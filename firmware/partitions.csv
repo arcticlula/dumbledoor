@@ -1,0 +1,9 @@
+# Two app slots, so new firmware can be uploaded from the app.
+# Name,   Type, SubType, Offset, Size
+nvs,      data, nvs,     ,       0x6000,
+otadata,  data, ota,     ,       0x2000,
+phy_init, data, phy,     ,       0x1000,
+ota_0,    app,  ota_0,   ,       1920K,
+ota_1,    app,  ota_1,   ,       1920K,
+# The last crash, read with `idf.py coredump-info`. Added at the end so nothing above moves.
+coredump, data, coredump, ,      64K,

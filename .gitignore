@@ -1,0 +1,11 @@
+.DS_Store
+
+# KiCad: backups, lock files and per-user view settings
+dumbledoor/*-backups/
+dumbledoor/~*.lck
+dumbledoor/*.kicad_prl
+dumbledoor/fp-info-cache
+
+# Tools
+tools/node_modules/
+tools/sim/.sim-state-*.json

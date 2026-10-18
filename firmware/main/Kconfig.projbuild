@@ -1,0 +1,233 @@
+menu "Dumbledoor"
+
+    # Names in quotes are the net labels in ../../dumbledoor/dumbledoor.kicad_sch.
+    # The defaults are the board as wired in October 2026: lobby input on GPIO1, door
+    # on GPIO13, debug LEDs on 39/37/35/33, and nothing else connected yet.
+
+    menu "Intercom lines"
+
+        config DUMBLEDOOR_PINS_SET
+            bool "These GPIOs (and the door ones) match the board"
+            default n
+            help
+                Until this is on, the firmware never drives the outputs (door, audio
+                channel, monitor call, LEDs): it only watches the inputs, so a wrong
+                pin can't hold the door release or a line. The app says so while
+                it's off. sdkconfig.defaults turns it on for this board's wiring.
+
+        config DUMBLEDOOR_LOBBY_GPIO
+            int "Lobby call input GPIO (\"lobby_button_pin\")"
+            range 0 46
+            default 1
+            help
+                The TLP627's collector, pulled up by R6. The panel's call on
+                terminal 7 is a ~570 Hz tone, so this pin toggles for as long as the
+                visitor holds the button. GPIO1, as in the 18 Sep 2025 sketch.
+
+        choice DUMBLEDOOR_LOBBY_MODE
+            prompt "Read the lobby input"
+            default DUMBLEDOOR_LOBBY_ADC
+            help
+                Through the ADC with thresholds, as the 18 Sep 2025 sketch did, or as
+                a digital pin with an interrupt on every edge. Copying the call to
+                the monitor (bell_pin) needs the digital input.
+
+            config DUMBLEDOOR_LOBBY_ADC
+                bool "Through the ADC, with thresholds (GPIO1-10 only)"
+            config DUMBLEDOOR_LOBBY_DIGITAL
+                bool "As a digital pin"
+        endchoice
+
+        config DUMBLEDOOR_LOBBY_ADC_LOW
+            int "The input counts as low below (0-4095)"
+            range 0 4095
+            default 1000
+            depends on DUMBLEDOOR_LOBBY_ADC
+            help
+                The 18 Sep 2025 sketch's threshold. `idf.py monitor` logs the lowest
+                and highest reading during every press, to check it against.
+
+        config DUMBLEDOOR_LOBBY_ADC_HIGH
+            int "The input counts as high above (0-4095)"
+            range 0 4095
+            default 3000
+            depends on DUMBLEDOOR_LOBBY_ADC
+
+        config DUMBLEDOOR_LOBBY_ACTIVE_LOW
+            bool "Lobby input is low while the call line is high"
+            default y
+            help
+                Yes for the TLP627 pulling the pin to GND (as in the schematic).
+
+        config DUMBLEDOOR_FRONT_GPIO
+            int "Front door call input GPIO (\"front_door_button_pin\", -1 = not wired)"
+            range -1 46
+            default -1
+            help
+                Terminal 20 through the R9/R10 divider: the apartment's own
+                doorbell. Only reported to the app; it never opens anything.
+
+        config DUMBLEDOOR_FRONT_ACTIVE_HIGH
+            bool "Front door input is high during a call"
+            default y
+            help
+                Yes for the resistor divider in the schematic.
+
+        config DUMBLEDOOR_BELL_GPIO
+            int "Monitor call output GPIO (\"bell_pin\", -1 = not wired)"
+            range -1 45
+            default -1
+            help
+                Drives Q3, which pulls terminal 7 on the monitor's side to GND.
+                Once terminal 7 is cut between the panel and the monitor, the
+                monitor only rings when the firmware copies the call tone through
+                (which needs the lobby input read digitally). High keeps the line
+                at 0 V, its idle state.
+
+        config DUMBLEDOOR_RING_RELEASE_MS
+            int "A press ends after this much silence (ms)"
+            range 20 1000
+            default 120
+            help
+                Bridges short gaps in the call tone so one press isn't split in
+                two. Raise it if the app's activity list shows one press as several.
+
+    endmenu
+
+    menu "Door and audio channel"
+
+        config DUMBLEDOOR_UNLOCK_GPIO
+            int "Door release output GPIO (\"unlock_pin\")"
+            range 0 45
+            default 13
+            help
+                Q2's gate: pulls terminal 9 to GND through R2, which is what the
+                monitor's door button does. GPIO13 in all the old sketches.
+
+        config DUMBLEDOOR_TALK_GPIO
+            int "Audio channel output GPIO (\"talk_pin\", -1 = not wired)"
+            range -1 45
+            default -1
+            help
+                Q1's gate: pulls terminal 9 to GND through R1, which is what the
+                monitor's audio button does.
+
+        config DUMBLEDOOR_OUTPUTS_ACTIVE_HIGH
+            bool "Outputs are active high"
+            default y
+            help
+                Yes for the AO3400A MOSFETs in the schematic (100k gate pull-downs
+                keep them off while the ESP32 boots).
+
+        config DUMBLEDOOR_UNLOCK_PULSE_MS
+            int "Door release pulse (ms)"
+            range 100 5000
+            default 1000
+            help
+                How long the door "button" is held, about as long as a person
+                presses the monitor's button.
+
+        config DUMBLEDOOR_TALK_LEAD_MS
+            int "Open the audio channel this long before the door pulse (ms, 0 = don't)"
+            range 0 5000
+            default 0
+            help
+                For systems that only take the door command while the audio
+                channel is open. Needs the audio channel output.
+
+        config DUMBLEDOOR_COOLDOWN_MS
+            int "Minimum time between two openings (ms)"
+            range 0 60000
+            default 3000
+
+    endmenu
+
+    menu "Board"
+
+        config DUMBLEDOOR_BUTTON_GPIO
+            int "Setup button GPIO (button to GND)"
+            range 0 46
+            default 0
+            help
+                GPIO0 is the BOOT button on the LOLIN S2 Mini. Holding it for
+                5 seconds opens Wi-Fi setup and lets one new admin phone pair.
+
+        config DUMBLEDOOR_LED_GPIO
+            int "Status LED GPIO (-1 = none)"
+            range -1 45
+            default 15
+            help
+                GPIO15 is the LOLIN S2 Mini's onboard LED.
+
+        config DUMBLEDOOR_LED_ACTIVE_HIGH
+            bool "Status LED is active high"
+            default y
+
+        config DUMBLEDOOR_PRESS_LED1_GPIO
+            int "Debug LED for the 1st press of a code (green, -1 = none)"
+            range -1 45
+            default 39
+            help
+                The debug LEDs from the old sketches, active high. The greens light
+                up one per press of the lobby button; all three flash when a code
+                is right, the red one flashes when it's wrong and stays on while
+                code entry is paused.
+
+        config DUMBLEDOOR_PRESS_LED2_GPIO
+            int "Debug LED for the 2nd press (green, -1 = none)"
+            range -1 45
+            default 37
+
+        config DUMBLEDOOR_PRESS_LED3_GPIO
+            int "Debug LED for the 3rd press and more (green, -1 = none)"
+            range -1 45
+            default 35
+
+        config DUMBLEDOOR_FAIL_LED_GPIO
+            int "Debug LED for wrong codes and unclear presses (red, -1 = none)"
+            range -1 45
+            default 33
+
+    endmenu
+
+    menu "Network"
+
+        config DUMBLEDOOR_HOSTNAME
+            string "Hostname"
+            default "dumbledoor"
+            help
+                The app answers at http://<hostname>.local on the home network.
+
+        config DUMBLEDOOR_SETUP_SSID
+            string "Setup hotspot name"
+            default "Dumbledoor Setup"
+
+        config DUMBLEDOOR_SETUP_PASSWORD
+            string "Setup hotspot password"
+            default ""
+            help
+                Leave empty for an open hotspot. Otherwise at least 8 characters.
+
+        config DUMBLEDOOR_SETUP_TIMEOUT_MIN
+            int "Close the setup hotspot after (minutes)"
+            range 1 120
+            default 15
+
+        config DUMBLEDOOR_WIFI_MAX_TX_POWER
+            int "Max Wi-Fi transmit power (0.25 dBm steps, 0 = driver default)"
+            range 0 84
+            default 0
+            help
+                Some small boards have a poorly tuned antenna and connect more
+                reliably at lower power (34 = 8.5 dBm).
+
+        config DUMBLEDOOR_NTP_SERVER
+            string "NTP server"
+            default "pool.ntp.org"
+            help
+                The clock is used to reject old (replayed) commands and to
+                timestamp the activity list.
+
+    endmenu
+
+endmenu

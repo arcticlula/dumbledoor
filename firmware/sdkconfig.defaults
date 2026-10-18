@@ -1,0 +1,37 @@
+# ESP32-S2 board with 4 MB flash and native USB (LOLIN S2 Mini and similar)
+CONFIG_IDF_TARGET="esp32s2"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Logs and `idf.py monitor` over the board's USB-C port (the S2 Mini has no USB-UART chip)
+CONFIG_ESP_CONSOLE_USB_CDC=y
+
+# 1 ms ticks, so ring presses are timed precisely
+CONFIG_FREERTOS_HZ=1000
+
+# The call tone is copied to the monitor from a GPIO interrupt that must keep running
+# while flash is written, so gpio_get_level()/gpio_set_level() live in IRAM
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
+
+# The ADC lobby input's DMA interrupt runs while flash is being read or written, too (on the S2
+# the driver always asks for an IRAM interrupt), but the function it calls only moves to IRAM
+# with this. Without it the board crashed whenever the two met (core dump of 2026-10-18).
+CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE=y
+
+# Web server: WebSockets, and room for the signed X-Auth header on firmware uploads
+CONFIG_HTTPD_WS_SUPPORT=y
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# A firmware uploaded from the app that crashes in its first minute is rolled back
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# The board as wired in October 2026 (the Kconfig defaults): lobby input GPIO1 through the
+# ADC, door GPIO13, debug LEDs 39/37/35/33; the bell, audio channel and front door aren't
+# connected yet. Turn this off before changing the wiring. See docs/hardware.md.
+CONFIG_DUMBLEDOOR_PINS_SET=y
+
+# A crash saves a core dump to flash; `idf.py coredump-info` shows where it happened. The USB
+# console disappears the moment the board resets, so the panic message often never arrives.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y

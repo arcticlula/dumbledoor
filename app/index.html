@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#130f1c">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Dumbledoor">
+<title>Dumbledoor</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="main.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Dumbledoor</h1>
+    <div class="status"><span id="status-text">Starting…</span><span id="status-dot" class="dot"></span></div>
+  </header>
+
+  <div id="banner" class="card banner" hidden></div>
+
+  <!-- Wi-Fi setup, on the device's own hotspot -->
+  <section id="wifi-setup" class="card" hidden>
+    <h2>Connect to Wi-Fi</h2>
+    <p class="muted lead">Choose your home network. Dumbledoor joins it, and then the app works from any phone on it.</p>
+    <form id="wifi-form">
+      <select id="ssid" required><option value="">Looking for networks…</option></select>
+      <input id="ssid-other" type="text" placeholder="Network name" autocapitalize="none" autocorrect="off" hidden>
+      <input id="wifi-password" type="password" placeholder="Password" autocomplete="current-password">
+      <button class="btn" type="submit">Connect</button>
+    </form>
+    <p id="wifi-msg" class="muted"></p>
+  </section>
+
+  <!-- No key yet -->
+  <section id="pair" class="card" hidden>
+    <h2>Pair this phone</h2>
+    <form id="claim-form" hidden>
+      <p class="muted lead">This Dumbledoor doesn’t have an admin yet. Pair this phone to become it: you can add other phones afterwards.</p>
+      <input id="claim-name" type="text" placeholder="Name for this phone, e.g. Luis’s Pixel" maxlength="23" required>
+      <button class="btn" type="submit">Pair this phone</button>
+    </form>
+    <p id="pair-help" class="muted lead"></p>
+  </section>
+
+  <div id="home" hidden>
+    <section id="ring" class="card ring" hidden>
+      <span class="ring-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      </span>
+      <div><strong id="ring-title"></strong><span id="ring-sub" class="muted"></span></div>
+    </section>
+
+    <section class="card hero">
+      <button id="open" class="open" type="button" aria-describedby="open-hint" disabled>
+        <span class="open-ring" aria-hidden="true"></span>
+        <svg class="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V8a7 7 0 0 1 14 0v13"/><path d="M3 21h18"/><path d="M14.5 13.5v.5"/></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="sr-only">Open the lobby door</span>
+      </button>
+      <p id="open-title" class="open-title">Hold to open</p>
+      <p id="open-hint" class="muted open-hint">Opens the lobby door downstairs</p>
+    </section>
+
+    <section class="card">
+      <h2>When someone rings</h2>
+      <div class="field">
+        <div class="field-label"><span>Open the door by itself</span><span id="auto-info" class="muted"></span></div>
+        <div id="auto-chips" class="chips">
+          <button class="chip" data-min="0">Off</button>
+          <button class="chip" data-min="15">15 min</button>
+          <button class="chip" data-min="60">1 hour</button>
+          <button class="chip" data-min="180">3 hours</button>
+        </div>
+      </div>
+      <div id="mute-field" class="field" hidden>
+        <div class="field-label"><span>Ring the monitor upstairs</span><span id="mute-info" class="muted"></span></div>
+        <div id="mute-chips" class="chips">
+          <button class="chip" data-min="0">Ring</button>
+          <button class="chip" data-min="60">Mute 1 h</button>
+          <button class="chip" data-min="480">Mute 8 h</button>
+          <button class="chip" data-min="-1">Mute</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Activity</h2>
+      <ol id="log" class="log"></ol>
+      <p id="log-empty" class="muted">Nothing yet. Rings and openings show up here.</p>
+      <button id="log-more" class="btn subtle more" type="button" hidden></button>
+    </section>
+
+    <details id="settings" class="card">
+      <summary><h2>Settings</h2><span class="muted" id="settings-summary"></span></summary>
+
+      <div class="group">
+        <h3>This phone</h3>
+        <div class="row"><span>Key</span><span id="me-key" class="muted"></span></div>
+        <div class="row"><span>Connected</span><span id="me-link" class="muted"></span></div>
+        <div id="notify-row" class="row" hidden>
+          <span>Notify me when someone rings</span>
+          <label class="switch"><input id="notify" type="checkbox" aria-label="Notify me when someone rings"><span></span></label>
+        </div>
+        <button id="forget" class="btn subtle" type="button">Forget this Dumbledoor</button>
+      </div>
+
+      <p id="admin-hint" class="muted" hidden></p>
+
+      <div id="admin" hidden>
+        <div class="group">
+          <h3>Phones</h3>
+          <ul id="keys" class="keys"></ul>
+          <form id="key-form">
+            <input id="key-name" type="text" placeholder="Name, e.g. Ana’s iPhone" maxlength="23" required>
+            <label class="check"><input id="key-admin" type="checkbox"> Admin: can add phones and change settings</label>
+            <button class="btn" type="submit">Create a pairing link</button>
+          </form>
+          <div id="new-key" class="new-key" hidden>
+            <p class="muted">Anyone with this link can open the door. Send it only to the person who’ll use it, and remove their phone here if it’s lost.</p>
+            <div id="links"></div>
+          </div>
+        </div>
+
+        <form id="code-form" class="group">
+          <h3>Code at the lobby panel</h3>
+          <p class="muted">Press the call button in a pattern of short and long presses, and the door opens. Every press still rings, so pick something nobody presses by accident.</p>
+          <div class="row">
+            <span>Open with a code</span>
+            <label class="switch"><input id="code-on" type="checkbox" aria-label="Open with a code"><span></span></label>
+          </div>
+          <div class="code-editor">
+            <output id="code-view" class="code-view" aria-live="polite"></output>
+            <div class="chips">
+              <button class="chip" type="button" data-sym=".">Short</button>
+              <button class="chip" type="button" data-sym="-">Long</button>
+              <button class="chip" type="button" data-sym="back" aria-label="Delete the last press">Delete</button>
+            </div>
+          </div>
+          <label class="field-label" for="code-short"><span>Short presses are under</span><span id="code-short-value"></span></label>
+          <input id="code-short" type="range" min="150" max="1500" step="50">
+          <label class="field-label" for="code-long"><span>Long presses are at least</span><span id="code-long-value"></span></label>
+          <input id="code-long" type="range" min="300" max="2000" step="50">
+          <label class="field-label" for="code-gap"><span>The code ends after a pause of</span><span id="code-gap-value"></span></label>
+          <input id="code-gap" type="range" min="800" max="4000" step="100">
+          <p class="muted">A press in between short and long counts as neither, so the code fails. Not sure where yours fall? Press the lobby button a few times and look at Activity: it shows how long each press was.</p>
+          <button class="btn" type="submit">Save code</button>
+        </form>
+
+        <form id="remote-form" class="group">
+          <h3>Remote access</h3>
+          <p class="muted">Through an MQTT broker, so phones can open the door from anywhere. Set-up guide: docs/remote-access.md.</p>
+          <div class="row">
+            <span>Use remote access</span>
+            <label class="switch"><input id="mqtt-on" type="checkbox" aria-label="Use remote access"><span></span></label>
+          </div>
+          <label class="label" for="mqtt-url">Broker, for Dumbledoor</label>
+          <input id="mqtt-url" type="url" placeholder="mqtts://xxxx.emqxsl.com:8883" autocapitalize="none">
+          <input id="mqtt-user" type="text" placeholder="User name" autocapitalize="none" autocomplete="off">
+          <input id="mqtt-pass" type="password" placeholder="Password" autocomplete="new-password">
+          <label class="label" for="app-mqtt-url">Broker, for phones</label>
+          <input id="app-mqtt-url" type="url" placeholder="wss://xxxx.emqxsl.com:8084/mqtt" autocapitalize="none">
+          <input id="app-mqtt-user" type="text" placeholder="User name (empty: same as above)" autocapitalize="none" autocomplete="off">
+          <input id="app-mqtt-pass" type="password" placeholder="Password" autocomplete="new-password">
+          <label class="label" for="mqtt-prefix">Topic prefix</label>
+          <input id="mqtt-prefix" type="text" placeholder="dumbledoor" autocapitalize="none">
+          <label class="label" for="app-url">Where the online app is</label>
+          <input id="app-url" type="url" placeholder="https://you.github.io/dumbledoor/" autocapitalize="none">
+          <button class="btn" type="submit">Save remote access</button>
+          <p id="remote-status" class="muted"></p>
+        </form>
+
+        <form id="push-form" class="group">
+          <h3>Ring notifications</h3>
+          <p class="muted">With the <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app, phones get a notification for every ring even when this app is closed. Use a hard-to-guess topic.</p>
+          <input id="ntfy" type="url" placeholder="https://ntfy.sh/dumbledoor-…" autocapitalize="none">
+          <button class="btn" type="submit">Save</button>
+        </form>
+
+        <form id="device-form" class="group">
+          <h3>Dumbledoor</h3>
+          <label class="label" for="device-name">Name</label>
+          <input id="device-name" type="text" maxlength="31" required>
+          <button class="btn" type="submit">Save name</button>
+          <div class="row"><span>Firmware</span><span id="fw" class="muted"></span></div>
+          <div class="row"><span>Wi-Fi</span><span id="wifi-info" class="muted"></span></div>
+          <label class="label" for="fw-file">Update the firmware (build/dumbledoor.bin)</label>
+          <input id="fw-file" type="file" accept=".bin">
+          <progress id="fw-progress" max="1" value="0" hidden></progress>
+          <p id="fw-msg" class="muted"></p>
+          <button id="reboot" class="btn subtle" type="button">Restart Dumbledoor</button>
+        </form>
+      </div>
+    </details>
+  </div>
+</main>
+
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
