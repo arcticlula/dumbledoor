@@ -27,7 +27,7 @@ HiveMQ Cloud's free Serverless plan no longer takes new clusters and shuts down 
 
 Away from home, phones load the app from an `https://` address: browsers don't let an `https://` page talk to a plain-`http://` device, and installing the app (Add to Home screen, notifications) needs `https://` anyway. The app is plain static files and holds no secrets; each phone's key arrives in its pairing link.
 
-- **GitHub Pages.** Push this repository to GitHub, then in the repository's Settings → Pages, set Source to "GitHub Actions". The workflow in `.github/workflows/pages.yml` publishes `app/` on every push that changes it, at `https://<user>.github.io/<repository>/`. GitHub Pages needs a public repository on a free account.
+- **GitHub Pages.** Push this repository to GitHub, then in the repository's Settings → Pages, set Source to "GitHub Actions". The workflow in `.github/workflows/pages.yml` publishes `app/` on every push that changes it, at `https://<user>.github.io/<repository>/`. GitHub Pages needs a public repository on a free account. This repository's copy is at **https://arcticlula.github.io/dumbledoor/** (set up 2026-10-18).
 - **Your own site.** Copy `app/` anywhere that serves `https://`. For example, `electrolula/public/dumbledoor/` would make it `https://lulalab.pt/dumbledoor/`.
 
 ## 3. Tell Dumbledoor
@@ -40,7 +40,7 @@ At home, open `http://dumbledoor.local` with an admin phone, then Settings → *
 | Broker, for Dumbledoor | `mqtts://<address>:8883`, its user name and password |
 | Broker, for phones | `wss://<address>:8084/mqtt`, the phones' user name and password (empty: the same as Dumbledoor's) |
 | Topic prefix | leave `dumbledoor`, or anything else |
-| Where the online app is | the address from step 2, e.g. `https://you.github.io/dumbledoor/` |
+| Where the online app is | the address from step 2, e.g. `https://arcticlula.github.io/dumbledoor/` |
 
 Save. A few seconds later the line under the form says "Dumbledoor is connected to the broker". If it doesn't, see the troubleshooting section below.
 

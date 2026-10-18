@@ -60,7 +60,7 @@ See [docs/hardware.md](docs/hardware.md). In short:
    - Pair a phone (step 4), then `node tools/ddctl.mjs --link … open` or the app pulses GPIO13 and the door opens.
 4. **Pair:** Wi-Fi setup through the hotspot, then pair the phone at `http://dumbledoor.local`.
 5. **Calibrate the code:** press the lobby button short and long a few times and read the lengths in Activity. Set the short and long thresholds around them, then choose a code of 4 or more presses and turn it on.
-6. **Remote access:** a broker, the app on GitHub Pages (or lulalab.pt), the settings, then new pairing links ([docs/remote-access.md](docs/remote-access.md)).
+6. **Remote access:** ~~the app online~~ (done 2026-10-18: [github.com/arcticlula/dumbledoor](https://github.com/arcticlula/dumbledoor), app at https://arcticlula.github.io/dumbledoor/). Next: a broker (EMQX Serverless), the Remote access settings, then new pairing links ([docs/remote-access.md](docs/remote-access.md)).
 7. **ntfy** for ring notifications with the app closed.
 8. **Schematic:** add the ESP32 board with these pins, R1/R2's values, and the protection diode if it goes in; re-export `docs/images/schematic.svg`.
 9. **The rest of the circuit, when it's connected:**

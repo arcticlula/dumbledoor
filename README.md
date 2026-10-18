@@ -9,6 +9,8 @@
 
 Build notes and photos: [Hackaday](https://hackaday.io/project/203886-dumbledoor) · [lulalab.pt](https://lulalab.pt/#/projects/dumb-le-door)
 
+The online app: [arcticlula.github.io/dumbledoor](https://arcticlula.github.io/dumbledoor/). It does nothing until a pairing link from a Dumbledoor sets it up.
+
 ## How it works
 
 ```
