@@ -9,6 +9,7 @@
 // Keys (in a terminal): r short lobby ring · l long ring · f front door · c the lobby code
 //                       b hold the board's button (lets a phone pair) · q quit
 // Or over HTTP: POST /sim/ring?line=lobby&ms=300 · POST /sim/code · POST /sim/button
+//               POST /sim/remote (a signed command, run as if it came through the broker)
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -65,7 +66,7 @@ const live = {
   claimUntil: saved.keys.length ? 0 : Date.now() + 30 * 60 * 1000,
   events: [],
   nextEvent: 1,
-  code: { seq: '', last: 0, pressing: false, timer: null },
+  code: { seq: '', last: 0, pressing: false, timer: null, held: [] },
   fails: 0,
 };
 
@@ -77,19 +78,18 @@ function post(event) {
   changed();
 }
 
-function state() {
+// `full` for admins; other keys get the short state, all opening the door needs.
+function state(full) {
   const now = Date.now();
+  const short = { type: 'state', v: VERSION, id: ID, name: saved.settings.name, pins: !args.includes('--no-pins') }; // pins: as if built without the GPIOs confirmed
+  if (!full) return short;
   return {
-    type: 'state',
-    v: VERSION,
-    id: ID,
-    name: saved.settings.name,
+    ...short,
     fw: '0.1.0-sim',
     time: now,
     up: uptime(),
-    pins: !args.includes('--no-pins'), // like firmware built without the GPIOs confirmed
     lines: ['lobby', 'front'],
-    ringing: { ...live.ringing },
+    ringing: { ...live.ringing, ...(saved.settings.code.on && { lobby: false }) }, // see holding()
     opening: live.opening,
     auto: live.autoUntil > now ? Math.ceil((live.autoUntil - now) / 1000) : 0,
     bell: !args.includes('--no-pins'),
@@ -168,11 +168,9 @@ function open(who, via) {
 function applySettings(set) {
   const s = structuredClone(saved.settings);
   for (const k of ['name', 'appUrl', 'ntfy']) if (typeof set[k] === 'string') s[k] = set[k];
-  if (set.code) Object.assign(s.code, set.code);
   if (set.mqtt) {
     for (const [k, v] of Object.entries(set.mqtt)) if (!((k === 'pass' || k === 'appPass') && v === '')) s.mqtt[k] = v;
   }
-  if (!/^[.-]*$/.test(s.code.seq) || (s.code.on && !s.code.seq) || s.code.short > s.code.long) return 'invalid_code';
   if (s.mqtt.on && !s.mqtt.url) return 'invalid_mqtt';
   const mqttChanged = JSON.stringify(s.mqtt) !== JSON.stringify(saved.settings.mqtt);
   saved.settings = s;
@@ -182,9 +180,44 @@ function applySettings(set) {
 }
 
 function settingsView() {
-  const s = saved.settings;
-  const { pass, appPass, ...mqtt } = s.mqtt;
-  return { ...s, mqtt: { ...mqtt, hasPass: !!pass, hasAppPass: !!appPass } };
+  const { name, mqtt: { pass, appPass, ...mqtt }, appUrl, ntfy } = saved.settings;
+  return { name, mqtt: { ...mqtt, hasPass: !!pass, hasAppPass: !!appPass }, appUrl, ntfy };
+}
+
+// The lobby code's presses travel sealed both ways, as in the firmware's run_code():
+// zero-padded to 12 bytes, XORed with HMAC(the key's secret, "code>" or "code<" + t).
+const codeKeystream = (key, dir, t) => createHmac('sha256', Buffer.from(key.secret, 'hex')).update(`code${dir}${t}`).digest();
+
+function sealCode(key, t, seq) {
+  const ks = codeKeystream(key, '<', t);
+  const padded = Buffer.alloc(12);
+  padded.write(seq, 'latin1');
+  return Buffer.from(padded.map((b, i) => b ^ ks[i])).toString('hex');
+}
+
+function unsealCode(key, t, hex) {
+  if (!/^[0-9a-f]{24}$/i.test(hex)) return null;
+  const ks = codeKeystream(key, '>', t);
+  const seq = Buffer.from(Buffer.from(hex, 'hex').map((b, i) => b ^ ks[i])).toString('latin1');
+  return /^[.-]*\0*$/.test(seq) ? seq.replace(/\0+$/, '') : null;
+}
+
+function runCode(p, key) {
+  const code = { ...saved.settings.code };
+  const set = p.set;
+  if (set !== undefined) {
+    const number = (k, lo, hi) => set[k] === undefined || (typeof set[k] === 'number' && set[k] >= lo && set[k] <= hi);
+    const typed = (k, type) => set[k] === undefined || typeof set[k] === type;
+    if (!set || typeof set !== 'object' || Array.isArray(set) || !typed('on', 'boolean') || !typed('seq', 'string')) return { error: 'invalid' };
+    if (!number('short', 100, 5000) || !number('long', 100, 5000) || !number('gap', 300, 10000)) return { error: 'invalid' };
+    for (const k of ['on', 'short', 'long', 'gap']) if (set[k] !== undefined) code[k] = set[k];
+    if (set.seq !== undefined) code.seq = unsealCode(key, p.t, set.seq);
+    if (code.seq === null || (code.on && !code.seq) || code.short > code.long) return { error: 'invalid_code' };
+    saved.settings.code = code;
+    save();
+    changed();
+  }
+  return { code: { ...code, seq: sealCode(key, p.t, code.seq) } };
 }
 
 function run(text, via) {
@@ -200,10 +233,16 @@ function run(text, via) {
   switch (p.a) {
     case 'hello':
     case 'state':
-      return done(null, { name: key.name, admin: key.admin, state: state() });
+      // Every phone on the broker sees the replies there: they get the short state.
+      return done(null, { name: key.name, admin: key.admin, state: state(key.admin && via === 'local') });
     case 'open':
       if (args.includes('--no-pins')) return done('no_pins');
       return done(open(key.name, via) ? null : 'busy');
+  }
+  // The rest is for admins: a phone from an ordinary link only opens the door.
+  if (!['auto', 'mute', 'code', 'settings', 'keys', 'key_add', 'key_remove', 'reboot'].includes(p.a)) return done('unknown_action');
+  if (!key.admin) return done('forbidden');
+  switch (p.a) {
     case 'auto':
       if (typeof p.min !== 'number' || p.min < 0 || p.min > 720) return done('invalid');
       live.autoUntil = p.min ? Date.now() + p.min * 60000 : 0;
@@ -214,9 +253,11 @@ function run(text, via) {
       live.mute = p.min < 0 ? -1 : p.min ? Date.now() + p.min * 60000 : 0;
       post({ e: 'mute', by: key.name, min: p.min });
       return done(null);
+    case 'code': {
+      const { error, code } = runCode(p, key); // from anywhere: the presses travel sealed
+      return done(error, error ? {} : { code });
+    }
   }
-  if (!['settings', 'keys', 'key_add', 'key_remove', 'reboot'].includes(p.a)) return done('unknown_action');
-  if (!key.admin) return done('forbidden');
   if (via !== 'local') return done('local_only');
   switch (p.a) {
     case 'settings': {
@@ -231,7 +272,7 @@ function run(text, via) {
       if (!k) return done('full');
       const pair = pairing(k);
       const extra = { pair, localLink: link(`http://localhost:${port}/`, pair) };
-      if (saved.settings.appUrl) extra.link = link(saved.settings.appUrl, pair);
+      if (saved.settings.appUrl && pair.m) extra.link = link(saved.settings.appUrl, pair); // like the firmware
       return done(null, extra);
     }
     case 'key_remove': {
@@ -252,6 +293,11 @@ function run(text, via) {
 
 // Rings and the lobby code ------------------------------------------------------
 
+// While the lobby code is on, phones hear nothing of lobby presses until they stop, as in
+// the firmware's door.c: their timing would give the code away. endCode() then reports
+// one outcome, and auto-opens.
+const holding = (line) => line === 'lobby' && saved.settings.code.on;
+
 function ring(line, ms) {
   log(`🔔 ${line} rings for ${ms} ms${live.mute ? ' (monitor muted)' : ''}`);
   live.ringing[line] = true;
@@ -259,31 +305,39 @@ function ring(line, ms) {
     live.code.pressing = true;
     clearTimeout(live.code.timer);
   }
-  changed();
+  if (!holding(line)) changed();
   setTimeout(() => {
     live.ringing[line] = false;
-    post({ e: 'ring', line, ms });
+    const held = holding(line);
+    if (held) live.code.held.push(ms);
+    else post({ e: 'ring', line, ms });
     if (line !== 'lobby') return;
     const c = live.code;
     c.pressing = false;
     const { short, long } = saved.settings.code;
     c.seq += ms < short ? '.' : ms >= long ? '-' : '?'; // in between spoils the code, like the firmware
     c.timer = setTimeout(endCode, saved.settings.code.gap);
-    if (live.autoUntil > Date.now()) setTimeout(() => open('auto-open', 'auto'), 500);
+    if (!held && live.autoUntil > Date.now()) setTimeout(() => open('auto-open', 'auto'), 500);
   }, ms);
 }
 
 function endCode() {
-  const seq = live.code.seq;
+  const { seq, held } = live.code;
   live.code.seq = '';
+  live.code.held = [];
+  const rings = () => held.forEach((ms) => post({ e: 'ring', line: 'lobby', ms }));
   const { on, seq: code } = saved.settings.code;
-  if (!on) return;
+  if (!on) return rings();
   if (seq === code) {
     live.fails = 0;
-    open('code', 'panel');
+    if (open('code', 'panel')) return; // the opening says it all; the presses are the code itself
+    rings();
   } else if (seq.length >= Math.min(3, code.length)) {
-    post({ e: 'code_fail', count: ++live.fails });
+    post({ e: 'code_fail', count: ++live.fails, seq });
+  } else {
+    rings(); // too few presses for a code
   }
+  if (live.autoUntil > Date.now()) open('auto-open', 'auto');
 }
 
 async function typeCode() {
@@ -300,13 +354,43 @@ function holdButton() {
 
 // Pushing state ---------------------------------------------------------------
 
+// Admins get the full state on every change; other phones the short state only when it
+// changes, at home and on the broker. Through the broker each admin's copy is sealed,
+// as in the firmware's api_seal().
+function sealState(key, text) {
+  const n = randomBytes(8).toString('hex');
+  const k = createHmac('sha256', Buffer.from(key.secret, 'hex')).update(`state<${n}`).digest();
+  const x = Buffer.from(text, 'utf8');
+  for (let off = 0; off < x.length; off += 32) {
+    const ks = createHmac('sha256', k).update(`k${off / 32}`).digest();
+    for (let i = 0; i < 32 && off + i < x.length; i++) x[off + i] ^= ks[i];
+  }
+  const m = createHmac('sha256', k).update('m').update(x).digest().subarray(0, 16).toString('hex');
+  return JSON.stringify({ n, m, x: x.toString('base64') });
+}
+
 let pushTimer = null;
+let homeShort = ''; // the short state as last pushed at home…
+let brokerShort = ''; // …and on the broker ('' after connecting, so it goes out)
+let sealedFor = []; // admin key ids with a sealed state on the broker
 function changed() {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(() => {
-    const text = JSON.stringify(state());
-    for (const c of clients) if (c.keyId && saved.keys.some((k) => k.id === c.keyId)) c.socket.write(frame(Buffer.from(text)));
-    if (remote?.connected) remote.publish(`${base}/state`, text, { retain: true });
+    const full = JSON.stringify(state(true));
+    const short = JSON.stringify(state(false));
+    for (const c of clients) {
+      const key = saved.keys.find((k) => k.id === c.keyId);
+      if (key?.admin) c.socket.write(frame(Buffer.from(full)));
+      else if (key && short !== homeShort) c.socket.write(frame(Buffer.from(short)));
+    }
+    homeShort = short;
+    if (!remote?.connected) return;
+    if (short !== brokerShort) remote.publish(`${base}/state`, short, { retain: true });
+    brokerShort = short;
+    const admins = saved.keys.filter((k) => k.admin);
+    for (const id of sealedFor) if (!admins.some((k) => k.id === id)) remote.publish(`${base}/state/${id}`, '', { retain: true });
+    for (const k of admins) remote.publish(`${base}/state/${k.id}`, sealState(k, full), { retain: true });
+    sealedFor = admins.map((k) => k.id);
   }, 50);
 }
 setInterval(() => {
@@ -374,6 +458,10 @@ const server = createServer(async (req, res) => {
   if (path === '/sim/button' && req.method === 'POST') {
     holdButton();
     return json(res, 200, { ok: true });
+  }
+  if (path === '/sim/remote' && req.method === 'POST') {
+    const { reply } = run(await body(req), 'remote');
+    return json(res, 200, reply);
   }
   // The app's files.
   const file = normalize(join(appDir, path === '/' ? 'index.html' : path));
@@ -476,6 +564,7 @@ async function connectRemote() {
     await remote.subscribe([`${base}/cmd`]);
     remote.publish(`${base}/status`, 'online', { retain: true });
     log(`connected to ${mqttUrl} as ${base}`);
+    brokerShort = '';
     changed();
   } catch (err) {
     log(`can't reach the broker (${err.message}), retrying in 5 s`);

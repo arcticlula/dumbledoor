@@ -10,7 +10,7 @@ typedef enum {
     EV_OPEN,        // who: key name, "code" or "auto-open"; via: "local", "remote", "panel", "auto"
     EV_AUTO,        // who turned auto-open on or off; value: minutes (0 = off)
     EV_MUTE,        // who muted or unmuted the monitor; value: minutes (0 = off, UINT32_MAX = until unmuted)
-    EV_CODE_FAIL,   // a wrong code at the lobby panel; value: wrong codes in a row
+    EV_CODE_FAIL,   // a wrong code at the lobby panel; value: wrong codes in a row; who: the presses ('.', '-', '?')
     EV_DENIED,      // a command that failed its signature check; who: reason; via
     EV_KEY_ADD,     // who: the new key's name
     EV_KEY_REMOVE,  // who: the removed key's name

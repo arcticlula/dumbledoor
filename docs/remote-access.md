@@ -2,7 +2,9 @@
 
 At home, the app talks to Dumbledoor directly over the Wi-Fi. To open the door from anywhere (from the street, where the Wi-Fi doesn't reach, or from work to let someone in), Dumbledoor also keeps an outgoing connection to an **MQTT broker** on the internet, and phones away from home connect to the same broker. Nothing has to reach into the home network: no port forwarding, no fixed IP.
 
-The broker only relays messages. Commands are signed with each phone's key (see [protocol.md](protocol.md)), so the broker can't open the door, replay a command or change anything. It does see the activity: who rang and when, and who opened.
+The broker only relays messages. Commands are signed with each phone's key (see [protocol.md](protocol.md)), so the broker can't open the door, replay a command or change anything. Every phone has the broker login, so the state everyone can read there only has what opening the door needs. Each admin gets the full state (rings, the activity) encrypted with their own key, and the lobby code travels encrypted too. So neither the broker nor the phones from ordinary links can read the activity. What they can see is when messages go by, so roughly when someone rings or opens. With the lobby code on, presses only go out as one outcome once they stop, so that timing doesn't give the code away.
+
+Away from home, the online app works as at home: a phone from an ordinary link gets the open button, and admins also get rings, the activity, auto-open, mute and the lobby code. Phones, remote access and the other settings only change at home.
 
 It takes four steps, all done once.
 
@@ -38,7 +40,7 @@ At home, open `http://dumbledoor.local` with an admin phone, then Settings → *
 |---|---|
 | Use remote access | on |
 | Broker, for Dumbledoor | `mqtts://<address>:8883`, its user name and password |
-| Broker, for phones | `wss://<address>:8084/mqtt`, the phones' user name and password (empty: the same as Dumbledoor's) |
+| Broker, for phones | `wss://<address>:8084/mqtt` (required: without it, links only work at home), the phones' user name and password (empty: the same as Dumbledoor's) |
 | Topic prefix | leave `dumbledoor`, or anything else |
 | Where the online app is | the address from step 2, e.g. `https://arcticlula.github.io/dumbledoor/` |
 
@@ -63,6 +65,7 @@ Topics on ntfy.sh are public: anyone who guesses the name sees the ring notifica
 ## Troubleshooting
 
 - **Settings says Dumbledoor isn't connected to the broker.** Check the address starts with `mqtts://` and ends in `:8883`, and the user name and password. With USB connected, `idf.py monitor` shows why: "the broker refused the connection (code 4)" means a wrong user name or password, and "can't reach the broker" means a wrong address, or no internet.
+- **The online app says "This phone's link has no broker details".** Dumbledoor's remote access wasn't complete when the link was made: **Use remote access** was off, or **Broker, for phones** was empty. Since 2026-10-18 the firmware only offers the online-app link once both are set, and **Where the online app is** too (older firmware offered it as soon as that last one was filled in). Saving Remote access and making a link both say which of the three is still missing. Fix it, wait for "Dumbledoor is connected to the broker", then make a new link.
 - **The online app says "Not on the broker".** The phone reached the broker, but Dumbledoor isn't connected to it (see above), or it's using a different topic prefix than the link.
 - **The online app says "Can't reach the broker: wrong user name or password".** The link has old credentials: make a new link.
 - **It works at home but not on mobile data.** Make sure the phone opened the link for the online app (an `https://` address), not the home one.

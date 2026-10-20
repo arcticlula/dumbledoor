@@ -52,12 +52,12 @@ Once it's installed, updates don't need USB: in the app, Settings → Dumbledoor
 
 ## How it behaves
 
-- **Lobby calls** show up in the app at once. Every press is timed and listed in the app's activity, with its length.
+- **Lobby calls** show up in admins' apps at once. Every press is timed and listed in the activity, with its length. While the lobby code is on, presses only show up once they stop, as one outcome: the door opening for the right code, the pattern for a wrong one, or rings when there weren't enough presses for a code. That way the timing of the updates can't give the code away. Phones from ordinary links only get the open button: the firmware sends them nothing about rings or the activity.
 - **Once `bell_pin` is connected** (and terminal 7 cut), calls pass through to the monitor edge by edge, so it rings as before. The app can then mute it for 1 h, 8 h or until unmuted, while phones still hear about rings; a restart unmutes.
 - **The debug LEDs:** a green LED lights for each press (the third one stays on from the third press on). All three flash when a code is right; the red one flashes for a wrong code, blinks once for a press between short and long, and stays on while code entry is paused.
-- **Auto-open** (15 min to 3 h) opens the door half a second after every lobby ring.
+- **Auto-open** (15 min to 3 h) opens the door half a second after every lobby ring. With the lobby code on, it waits for the presses to stop (1.5 s by default).
 - **Code at the lobby panel:** a pattern of short (under 400 ms) and long (700 ms or more) presses on the apartment's call button opens the door once the presses stop (1.5 s by default). A press in between counts as neither, so that code fails. The thresholds are the old Arduino sketches' and can be changed in the app. Off until enabled there. Five wrong codes (of 3 or more presses) within 15 minutes pause code entry for 15 minutes.
-- **The front door bell** (terminal 20) only shows up in the app and notifications.
+- **The front door bell** (terminal 20) only shows up in admins' apps and notifications.
 - **Opening** holds `unlock_pin` for 1 s, optionally after opening the audio channel first, then waits 3 s before it can open again.
 - **The button:** holding it for 5 s opens the setup hotspot (to change Wi-Fi) and lets one new admin phone pair for 10 minutes, e.g. after losing the only admin phone.
 - **The LED:** on while the door opens; fast blink while someone rings; slow blink while the setup hotspot is open; a short blip every 2 s while Wi-Fi is down.

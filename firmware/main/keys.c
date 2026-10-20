@@ -230,6 +230,18 @@ const char *keys_error(auth_result_t r)
     }
 }
 
+esp_err_t keys_hmac(uint32_t id, const void *msg, size_t len, uint8_t *out)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    stored_key_t *key = find(id);
+    if (key) {
+        mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key->secret, sizeof(key->secret), msg, len,
+                        out);
+    }
+    xSemaphoreGive(s_lock);
+    return key ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 // Caller holds s_lock.
 static esp_err_t add_locked(const char *name, bool admin, key_info_t *out, char *secret_hex)
 {

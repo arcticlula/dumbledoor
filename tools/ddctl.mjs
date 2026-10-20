@@ -7,11 +7,11 @@
 //   node tools/ddctl.mjs --link "$(cat ~/.dumbledoor-link)" open
 //   node tools/ddctl.mjs --link … auto 15        (open on every ring for 15 min; 0 = off)
 //   node tools/ddctl.mjs --link … mute 60        (keep the monitor quiet for 60 min; -1 = until unmuted)
-//   node tools/ddctl.mjs --link … keys | settings | reboot
+//   node tools/ddctl.mjs --link … keys | settings | code | reboot   (code: the lobby code, admins)
 //   node tools/ddctl.mjs --link … --host 192.168.1.50 open    (if .local names don't resolve)
 
 import { fromBase64Url } from '../app/crypto.js';
-import { sign } from '../app/device.js';
+import { sign, unsealCode } from '../app/device.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -38,12 +38,13 @@ const base = hostArg || !new URL(link).protocol.startsWith('http:') ? `http://${
 
 const extra = {};
 if (action === 'auto' || action === 'mute') extra.min = Number(value ?? 0);
-const { text } = sign(pairing, action, extra);
+const { text, t } = sign(pairing, action, extra);
 const res = await fetch(`${base}/api/cmd`, { method: 'POST', body: text }).catch((err) => {
   console.error(`Can’t reach ${base}: ${err.cause?.code || err.message}`);
   process.exit(1);
 });
 const reply = await res.json();
+if (action === 'code' && reply.ok) reply.code.seq = unsealCode(pairing, '<', t, reply.code.seq); // it travels sealed
 if (action === 'state' && reply.state) {
   const s = reply.state;
   console.log(`${s.name} (${s.id}), firmware ${s.fw}, Wi-Fi ${s.wifi.ssid} ${s.wifi.rssi} dBm, free heap ${s.heap} B`);

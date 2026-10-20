@@ -50,7 +50,7 @@
   </section>
 
   <div id="home" hidden>
-    <section id="ring" class="card ring" hidden>
+    <section id="ring" class="card ring admin-only" hidden>
       <span class="ring-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
       </span>
@@ -69,7 +69,7 @@
       <p id="open-hint" class="muted open-hint">Opens the lobby door downstairs</p>
     </section>
 
-    <section class="card">
+    <section class="card admin-only">
       <h2>When someone rings</h2>
       <div class="field">
         <div class="field-label"><span>Open the door by itself</span><span id="auto-info" class="muted"></span></div>
@@ -91,14 +91,14 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card admin-only">
       <h2>Activity</h2>
       <ol id="log" class="log"></ol>
       <p id="log-empty" class="muted">Nothing yet. Rings and openings show up here.</p>
       <button id="log-more" class="btn subtle more" type="button" hidden></button>
     </section>
 
-    <details id="settings" class="card">
+    <details id="settings" class="card admin-only">
       <summary><h2>Settings</h2><span class="muted" id="settings-summary"></span></summary>
 
       <div class="group">
@@ -112,15 +112,13 @@
         <button id="forget" class="btn subtle" type="button">Forget this Dumbledoor</button>
       </div>
 
-      <p id="admin-hint" class="muted" hidden></p>
-
-      <div id="admin" hidden>
-        <div class="group">
+      <div id="admin">
+        <div class="group home-only">
           <h3>Phones</h3>
           <ul id="keys" class="keys"></ul>
           <form id="key-form">
             <input id="key-name" type="text" placeholder="Name, e.g. Ana’s iPhone" maxlength="23" required>
-            <label class="check"><input id="key-admin" type="checkbox"> Admin: can add phones and change settings</label>
+            <label class="check"><input id="key-admin" type="checkbox"> Admin: rings, activity and settings too. Otherwise just the open button.</label>
             <button class="btn" type="submit">Create a pairing link</button>
           </form>
           <div id="new-key" class="new-key" hidden>
@@ -150,11 +148,11 @@
           <input id="code-long" type="range" min="300" max="2000" step="50">
           <label class="field-label" for="code-gap"><span>The code ends after a pause of</span><span id="code-gap-value"></span></label>
           <input id="code-gap" type="range" min="800" max="4000" step="100">
-          <p class="muted">A press in between short and long counts as neither, so the code fails. Not sure where yours fall? Press the lobby button a few times and look at Activity: it shows how long each press was.</p>
+          <p class="muted">A press in between short and long counts as neither, so the code fails. Not sure where yours fall? Press the lobby button a few times, a couple of seconds apart, and look at Activity: it shows how long each press was. While the code is on, presses show up once they stop: a wrong code as its pattern, the right one as the door opening.</p>
           <button class="btn" type="submit">Save code</button>
         </form>
 
-        <form id="remote-form" class="group">
+        <form id="remote-form" class="group home-only">
           <h3>Remote access</h3>
           <p class="muted">Through an MQTT broker, so phones can open the door from anywhere. Set-up guide: docs/remote-access.md.</p>
           <div class="row">
@@ -177,14 +175,14 @@
           <p id="remote-status" class="muted"></p>
         </form>
 
-        <form id="push-form" class="group">
+        <form id="push-form" class="group home-only">
           <h3>Ring notifications</h3>
           <p class="muted">With the <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app, phones get a notification for every ring even when this app is closed. Use a hard-to-guess topic.</p>
           <input id="ntfy" type="url" placeholder="https://ntfy.sh/dumbledoor-…" autocapitalize="none">
           <button class="btn" type="submit">Save</button>
         </form>
 
-        <form id="device-form" class="group">
+        <form id="device-form" class="group home-only">
           <h3>Dumbledoor</h3>
           <label class="label" for="device-name">Name</label>
           <input id="device-name" type="text" maxlength="31" required>
@@ -198,6 +196,8 @@
           <button id="reboot" class="btn subtle" type="button">Restart Dumbledoor</button>
         </form>
       </div>
+
+      <p id="admin-hint" class="muted" hidden>Phones and the other settings can only be changed at home: open http://dumbledoor.local.</p>
     </details>
   </div>
 </main>

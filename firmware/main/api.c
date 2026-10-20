@@ -5,8 +5,10 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/md.h"
 #include "sdkconfig.h"
 #include "api.h"
 #include "door.h"
@@ -20,6 +22,7 @@
 #define MUTE_MAX_MIN (24 * 60)
 #define DENIED_LOG_GAP_MS 10000   // list at most one rejected command per 10 s, so junk can't flood it
 #define LOCAL_APP_URL "http://" CONFIG_DUMBLEDOOR_HOSTNAME ".local/"
+#define SEAL_HEAD 72   // {"n":"<16 hex>","m":"<32 hex>","x":"
 
 static const char *TAG = "api";
 
@@ -56,6 +59,7 @@ static cJSON *event_json(const event_t *e)
         break;
     case EV_CODE_FAIL:
         cJSON_AddNumberToObject(o, "count", e->value);
+        cJSON_AddStringToObject(o, "seq", e->who);
         break;
     case EV_DENIED:
         cJSON_AddStringToObject(o, "why", e->who);
@@ -71,24 +75,28 @@ static cJSON *event_json(const event_t *e)
     return o;
 }
 
-cJSON *api_state(void)
+cJSON *api_state(bool full)
 {
     door_state_t door;
     door_get_state(&door);
     char name[32];
     settings_get_name(name, sizeof(name));
-    net_status_t net;
-    net_get_status(&net);
 
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "type", "state");
     cJSON_AddNumberToObject(o, "v", API_VERSION);
     cJSON_AddStringToObject(o, "id", util_device_id());
     cJSON_AddStringToObject(o, "name", name);
+    cJSON_AddBoolToObject(o, "pins", door.outputs_ok);
+    if (!full) {
+        return o;
+    }
+
+    net_status_t net;
+    net_get_status(&net);
     cJSON_AddStringToObject(o, "fw", esp_app_get_description()->version);
     cJSON_AddNumberToObject(o, "time", (double)util_wall_ms());
     cJSON_AddNumberToObject(o, "up", util_uptime_ms());
-    cJSON_AddBoolToObject(o, "pins", door.outputs_ok);
 
     cJSON *lines = cJSON_AddArrayToObject(o, "lines");
     cJSON *ringing = cJSON_AddObjectToObject(o, "ringing");
@@ -156,6 +164,57 @@ cJSON *api_pairing(const key_info_t *key, const char *secret_hex)
     return o;
 }
 
+// The broker carries everything to every phone with its login, so admins get the full
+// state there sealed: XORed with a keystream only their phone can work out, plus a tag
+// that shows it wasn't changed. K = HMAC-SHA256(secret, "state<" + nonce); block i of the
+// keystream is HMAC-SHA256(K, "k" + i), and the tag is the first 16 bytes of
+// HMAC-SHA256(K, "m" + ciphertext). A new nonce per message makes a new K.
+char *api_seal(uint32_t key_id, const char *text)
+{
+    uint8_t nonce[8];
+    char n[2 * sizeof(nonce) + 1];
+    esp_fill_random(nonce, sizeof(nonce));
+    util_hex(nonce, sizeof(nonce), n);
+    char label[24];
+    int label_len = snprintf(label, sizeof(label), "state<%s", n);
+    uint8_t k[32];
+    if (keys_hmac(key_id, label, label_len, k) != ESP_OK) {
+        return NULL;
+    }
+
+    size_t len = strlen(text);
+    size_t b64_size = 4 * ((len + 2) / 3) + 1;
+    uint8_t *x = malloc(1 + len);   // "m", then the ciphertext, ready for the tag
+    char *out = malloc(SEAL_HEAD + b64_size + 2);
+    if (!x || !out) {
+        free(x);
+        free(out);
+        return NULL;
+    }
+    const mbedtls_md_info_t *sha256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    x[0] = 'm';
+    for (size_t off = 0; off < len; off += 32) {
+        char block[12];
+        int block_len = snprintf(block, sizeof(block), "k%u", (unsigned)(off / 32));
+        uint8_t ks[32];
+        mbedtls_md_hmac(sha256, k, sizeof(k), (const unsigned char *)block, block_len, ks);
+        for (size_t i = 0; i < sizeof(ks) && off + i < len; i++) {
+            x[1 + off + i] = (uint8_t)text[off + i] ^ ks[i];
+        }
+    }
+    uint8_t tag[32];
+    mbedtls_md_hmac(sha256, k, sizeof(k), x, 1 + len, tag);
+    char m[33];
+    util_hex(tag, 16, m);
+
+    int head = snprintf(out, SEAL_HEAD, "{\"n\":\"%s\",\"m\":\"%s\",\"x\":\"", n, m);
+    size_t b64_len = 0;
+    mbedtls_base64_encode((unsigned char *)out + head, b64_size, &b64_len, x + 1, len);
+    memcpy(out + head + b64_len, "\"}", 3);
+    free(x);
+    return out;
+}
+
 // "<base>#pair=<base64url of the pairing JSON>". Caller frees.
 static char *pairing_link(const char *base, const cJSON *pairing)
 {
@@ -215,12 +274,6 @@ static cJSON *settings_json(const dd_settings_t *s)
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "name", s->name);
-    cJSON *code = cJSON_AddObjectToObject(o, "code");
-    cJSON_AddBoolToObject(code, "on", s->code.on);
-    cJSON_AddStringToObject(code, "seq", s->code.seq);
-    cJSON_AddNumberToObject(code, "short", s->code.short_ms);
-    cJSON_AddNumberToObject(code, "long", s->code.long_ms);
-    cJSON_AddNumberToObject(code, "gap", s->code.gap_ms);
     // Passwords never leave the device; the app only learns whether one is set.
     cJSON *mqtt = cJSON_AddObjectToObject(o, "mqtt");
     cJSON_AddBoolToObject(mqtt, "on", s->mqtt_on);
@@ -295,18 +348,10 @@ static bool has_scheme(const char *url, const char *a, const char *b)
 
 static const char *apply_settings(dd_settings_t *s, const cJSON *set)
 {
-    const cJSON *code = cJSON_GetObjectItemCaseSensitive(set, "code");
     const cJSON *mqtt = cJSON_GetObjectItemCaseSensitive(set, "mqtt");
     bool ok = take_string(set, "name", s->name, sizeof(s->name)) &&
               take_string(set, "appUrl", s->app_url, sizeof(s->app_url)) &&
               take_string(set, "ntfy", s->ntfy_url, sizeof(s->ntfy_url));
-    if (ok && code) {
-        ok = cJSON_IsObject(code) && take_bool(code, "on", &s->code.on) &&
-             take_string(code, "seq", s->code.seq, sizeof(s->code.seq)) &&
-             take_number(code, "short", 100, 5000, &s->code.short_ms) &&
-             take_number(code, "long", 100, 5000, &s->code.long_ms) &&
-             take_number(code, "gap", 300, 10000, &s->code.gap_ms);
-    }
     if (ok && mqtt) {
         ok = cJSON_IsObject(mqtt) && take_bool(mqtt, "on", &s->mqtt_on) &&
              take_string(mqtt, "url", s->mqtt_url, sizeof(s->mqtt_url)) &&
@@ -319,10 +364,6 @@ static const char *apply_settings(dd_settings_t *s, const cJSON *set)
     }
     if (!ok || !s->name[0]) {
         return "invalid";
-    }
-    if (strspn(s->code.seq, ".-") != strlen(s->code.seq) || (s->code.on && !s->code.seq[0]) ||
-        s->code.short_ms > s->code.long_ms) {
-        return "invalid_code";
     }
     if ((s->mqtt_url[0] && !has_scheme(s->mqtt_url, "mqtt://", "mqtts://") &&
          !has_scheme(s->mqtt_url, "ws://", "wss://")) ||
@@ -378,6 +419,89 @@ static const char *run_settings(const cJSON *p, cJSON *reply)
     return error;
 }
 
+// The lobby code ------------------------------------------------------------
+
+// Admins can change the code from anywhere, so its presses travel sealed: zero-padded to
+// KNOCK_MAX bytes and XORed with HMAC-SHA256(the phone's secret, "code>" + t) on the way
+// in, or "code<" + t on the way out, where t is the command's timestamp. Timestamps
+// never repeat, so neither do keystreams, and the broker and the other phones listening
+// on it can't read the code. See docs/protocol.md.
+static bool code_keystream(const key_info_t *who, char dir, int64_t t, uint8_t *ks)
+{
+    char label[32];
+    int n = snprintf(label, sizeof(label), "code%c%" PRId64, dir, t);
+    return keys_hmac(who->id, label, n, ks) == ESP_OK;
+}
+
+static void seal_code(const char *seq, const uint8_t *ks, char *hex)
+{
+    uint8_t b[KNOCK_MAX] = { 0 };
+    memcpy(b, seq, strnlen(seq, KNOCK_MAX));
+    for (int i = 0; i < KNOCK_MAX; i++) {
+        b[i] ^= ks[i];
+    }
+    util_hex(b, KNOCK_MAX, hex);
+}
+
+// False unless `hex` opens to presses followed by nothing but padding.
+static bool unseal_code(const char *hex, const uint8_t *ks, char *seq)
+{
+    uint8_t b[KNOCK_MAX];
+    if (!util_unhex(hex, b, KNOCK_MAX)) {
+        return false;
+    }
+    int n = 0;
+    for (int i = 0; i < KNOCK_MAX; i++) {
+        uint8_t c = b[i] ^ ks[i];
+        if ((c == '.' || c == '-') && n == i) {
+            seq[n++] = (char)c;
+        } else if (c != 0) {
+            return false;
+        }
+    }
+    seq[n] = '\0';
+    return true;
+}
+
+static const char *run_code(const cJSON *p, const key_info_t *who, cJSON *reply)
+{
+    // keys_verify() made sure "t" is a number
+    int64_t t = (int64_t)cJSON_GetObjectItemCaseSensitive(p, "t")->valuedouble;
+    uint8_t ks[32];
+    settings_code_t code;
+    settings_get_code(&code);
+    const cJSON *set = cJSON_GetObjectItemCaseSensitive(p, "set");
+    if (set) {
+        const cJSON *seq = cJSON_GetObjectItemCaseSensitive(set, "seq");
+        if (!cJSON_IsObject(set) || (seq && !cJSON_IsString(seq)) || !take_bool(set, "on", &code.on) ||
+            !take_number(set, "short", 100, 5000, &code.short_ms) ||
+            !take_number(set, "long", 100, 5000, &code.long_ms) ||
+            !take_number(set, "gap", 300, 10000, &code.gap_ms)) {
+            return "invalid";
+        }
+        if (seq && !code_keystream(who, '>', t, ks)) {
+            return "unknown_key";
+        }
+        if ((seq && !unseal_code(seq->valuestring, ks, code.seq)) || (code.on && !code.seq[0]) ||
+            code.short_ms > code.long_ms) {
+            return "invalid_code";
+        }
+        settings_set_code(&code);
+    }
+    if (!code_keystream(who, '<', t, ks)) {
+        return "unknown_key";
+    }
+    char sealed[2 * KNOCK_MAX + 1];
+    seal_code(code.seq, ks, sealed);
+    cJSON *o = cJSON_AddObjectToObject(reply, "code");
+    cJSON_AddBoolToObject(o, "on", code.on);
+    cJSON_AddStringToObject(o, "seq", sealed);
+    cJSON_AddNumberToObject(o, "short", code.short_ms);
+    cJSON_AddNumberToObject(o, "long", code.long_ms);
+    cJSON_AddNumberToObject(o, "gap", code.gap_ms);
+    return NULL;
+}
+
 // Keys ----------------------------------------------------------------------
 
 static const char *run_keys(cJSON *reply)
@@ -424,7 +548,9 @@ static const char *run_key_add(const cJSON *p, cJSON *reply)
     dd_settings_t *s = malloc(sizeof(*s));
     if (s) {
         settings_get(s);
-        if (s->app_url[0]) {
+        // The online app reaches Dumbledoor only through the broker, so its link needs the
+        // broker details in the pairing ("m"); without them it would never connect.
+        if (s->app_url[0] && cJSON_GetObjectItemCaseSensitive(pairing, "m")) {
             link = pairing_link(s->app_url, pairing);
         }
         free(s);
@@ -463,12 +589,26 @@ static const char *run_action(const char *a, const cJSON *p, api_via_t via, cons
     if (!strcmp(a, "hello") || !strcmp(a, "state")) {
         cJSON_AddStringToObject(reply, "name", who->name);
         cJSON_AddBoolToObject(reply, "admin", who->admin);
-        cJSON_AddItemToObject(reply, "state", api_state());
+        // Every phone on the broker sees the replies there, so they carry the short state.
+        // Admins get the full one sealed on their own topic (remote.c).
+        cJSON_AddItemToObject(reply, "state", api_state(who->admin && via == API_LOCAL));
         return NULL;
     }
     if (!strcmp(a, "open")) {
         esp_err_t err = door_open(who->name, via == API_LOCAL ? "local" : "remote");
         return err == ESP_OK ? NULL : err == ESP_ERR_NOT_SUPPORTED ? "no_pins" : "busy";
+    }
+
+    // The rest is for admins: a phone from an ordinary link only opens the door. Keys,
+    // settings and restarts also take the home network; the lobby code travels sealed.
+    bool admin_action = !strcmp(a, "auto") || !strcmp(a, "mute") || !strcmp(a, "code") ||
+                        !strcmp(a, "settings") || !strcmp(a, "keys") || !strcmp(a, "key_add") ||
+                        !strcmp(a, "key_remove") || !strcmp(a, "reboot");
+    if (!admin_action) {
+        return "unknown_action";
+    }
+    if (!who->admin) {
+        return "forbidden";
     }
     if (!strcmp(a, "auto")) {
         const cJSON *min = cJSON_GetObjectItemCaseSensitive(p, "min");
@@ -486,15 +626,8 @@ static const char *run_action(const char *a, const cJSON *p, api_via_t via, cons
         door_set_mute((int32_t)min->valuedouble, who->name);
         return NULL;
     }
-
-    // The rest decides who can get in, so it takes an admin key on the home network.
-    bool admin_action = !strcmp(a, "settings") || !strcmp(a, "keys") || !strcmp(a, "key_add") ||
-                        !strcmp(a, "key_remove") || !strcmp(a, "reboot");
-    if (!admin_action) {
-        return "unknown_action";
-    }
-    if (!who->admin) {
-        return "forbidden";
+    if (!strcmp(a, "code")) {
+        return run_code(p, who, reply);
     }
     if (via != API_LOCAL) {
         return "local_only";

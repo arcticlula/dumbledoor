@@ -43,6 +43,7 @@ const ERRORS = {
   no_memory: 'Dumbledoor ran out of memory. Try again.',
   claim_closed: 'Pairing isn’t open right now.',
   no_pins: 'Dumbledoor’s GPIOs aren’t confirmed in its firmware yet, so it can’t open the door.',
+  garbled: 'Dumbledoor’s answer didn’t make sense. Try again.',
 };
 const errorText = (code) => ERRORS[code] || `Something went wrong (${code}).`;
 
@@ -191,7 +192,7 @@ function showPair() {
   if (mode === 'remote') {
     $('claim-form').hidden = true;
     help.textContent = pairing
-      ? 'This phone was paired before remote access was set up, so it only works at home. Ask an admin for a new link.'
+      ? 'This phone’s link has no broker details, so it only works at home: Dumbledoor’s remote access wasn’t set up when the link was made. Once Settings → Remote access says Dumbledoor is connected to the broker, make a new link (or ask an admin for one).'
       : 'Open the pairing link you were sent. Admins make one at home: open http://dumbledoor.local, then Settings → Phones.';
     return;
   }
@@ -257,6 +258,9 @@ function renderStatus() {
   }[s];
   $('status-text').textContent = text;
   if (s === 'denied' && mode === 'local') repairIfOpen();
+  // Settings opened before the connection was up: fill them in now, before anyone saves
+  // the empty forms over what Dumbledoor has.
+  if (s === 'online' && !adminLoaded && $('settings').open && pairing.a) loadAdmin();
   if (s === 'denied') banner(errorText('unknown_key'));
   else if (s === 'error') banner(errorText(device.detail));
   else if (s === 'offline' && device.detail === 'never_connected')
@@ -307,6 +311,9 @@ function onState() {
     if (now && !ringing[line] && !firstState) ringStarted(line);
     ringing[line] = now;
   }
+  // With the lobby code on, lobby presses only show up once they stop, as one outcome.
+  const fresh = firstState ? [] : (s.events || []).filter((e) => e.n > seenEvent);
+  if (s.code?.on && fresh.some(atLobby)) ringStarted('lobby');
   renderLog();
   renderRing();
   renderToggles();
@@ -318,6 +325,9 @@ function onState() {
 // The ring banner and notifications ------------------------------------------
 
 const RING_TEXT = { lobby: 'Someone’s at the lobby', front: 'Someone’s at your front door' };
+// Events that mean someone was at a door: a ring, or a wrong code at the lobby panel.
+const atDoor = (e) => e.e === 'ring' || e.e === 'code_fail';
+const atLobby = (e) => (e.e === 'ring' && e.line === 'lobby') || e.e === 'code_fail';
 
 function ringStarted(line) {
   navigator.vibrate?.([200, 100, 200, 100, 200]);
@@ -343,11 +353,11 @@ function renderRing() {
   let sub = 'Ringing now';
   if (!now) {
     const events = s.events || [];
-    const ring = [...events].reverse().find((e) => e.e === 'ring');
+    const ring = [...events].reverse().find(atDoor);
     if (!ring || eventAge(ring) > RECENT_RING_MS) return (card.hidden = true);
-    line = ring.line;
+    line = ring.line || 'lobby';
     const opened = events.some((e) => e.e === 'open' && e.n > ring.n);
-    sub = `Rang ${ago(eventAge(ring))}${opened ? ' · door opened' : ''}`;
+    sub = `${ring.e === 'code_fail' ? 'Wrong code' : 'Rang'} ${ago(eventAge(ring))}${opened ? ' · door opened' : ''}`;
   }
   card.hidden = false;
   card.classList.toggle('now', now);
@@ -484,6 +494,7 @@ $('mute-chips').onclick = (event) => toggle('mute', event.target.closest('.chip'
 const VIA = { local: 'from home Wi-Fi', remote: 'from outside', panel: '', auto: '' };
 const REASONS = { 'power-on': 'power on', restart: 'restart', crash: 'after a crash', watchdog: 'after it froze', brownout: 'after a power dip' };
 const DENIED = { unknown_key: 'A removed or unknown phone', bad_signature: 'A forged or broken command', wrong_device: 'A key for another Dumbledoor' };
+const PRESS = { '.': '•', '-': '—', '?': '?' }; // short, long, in between
 const LOG_SHORT = 6; // events shown until "Show all"
 let logExpanded = false;
 
@@ -500,8 +511,10 @@ function describe(e) {
     case 'mute':
       if (e.min === 0) return ['🔔', 'The monitor rings again', `by ${e.by}`];
       return ['🔕', e.min < 0 ? 'Monitor muted' : `Monitor muted for ${duration(e.min * 60)}`, `by ${e.by}`];
-    case 'code_fail':
-      return ['✋', 'Wrong code at the panel', e.count > 1 ? `${e.count} in a row` : ''];
+    case 'code_fail': {
+      const presses = [...(e.seq || '')].map((p) => PRESS[p] || p).join(' ');
+      return ['✋', 'Wrong code at the panel', [presses, e.count > 1 ? `${e.count} in a row` : ''].filter(Boolean).join(' · ')];
+    }
     case 'denied':
       return ['⚠️', 'Refused a command', `${DENIED[e.why] || e.why} ${VIA[e.via] ?? ''}`.trim()];
     case 'key_add':
@@ -579,18 +592,18 @@ document.addEventListener('visibilitychange', () => {
 
 function renderPhone() {
   if (!pairing) return;
+  // A phone from an ordinary link only gets the button.
+  document.body.classList.toggle('guest', !pairing.a);
   $('me-key').textContent = `${pairing.n}${pairing.a ? ' · admin' : ''}`;
   $('me-link').textContent = mode === 'local' ? `home Wi-Fi (${location.host})` : 'through the broker';
   $('settings-summary').textContent = pairing.dn || '';
   const canNotify = mode === 'remote' && window.isSecureContext && 'Notification' in window && 'serviceWorker' in navigator;
   $('notify-row').hidden = !canNotify;
   $('notify').checked = canNotify && storage.get(NOTIFY) === '1' && Notification.permission === 'granted';
-  const admin = pairing.a && mode === 'local';
-  $('admin').hidden = !admin;
-  $('admin-hint').hidden = admin;
-  $('admin-hint').textContent = !pairing.a
-    ? 'Only admins can add phones and change settings.'
-    : 'Phones and settings can only be changed at home: open http://dumbledoor.local.';
+  // Admins can change the lobby code from anywhere; phones and the other settings only at home.
+  const home = mode === 'local';
+  for (const group of document.querySelectorAll('#admin .home-only')) group.hidden = !home;
+  $('admin-hint').hidden = home;
 }
 
 $('notify').onchange = async (event) => {
@@ -612,17 +625,23 @@ $('forget').onclick = () => {
   location.reload();
 };
 
-// Settings: admin (home network only) -----------------------------------------------
+// Settings: admin (the lobby code from anywhere, the rest at home) -------------------
 
 let settings = null;
 let codeSeq = '';
+let adminLoaded = false; // the admin forms hold what Dumbledoor has
 
 $('settings').addEventListener('toggle', () => {
-  if ($('settings').open && !$('admin').hidden) loadAdmin();
+  if ($('settings').open && pairing?.a) loadAdmin();
 });
 
 async function loadAdmin() {
-  const [s, k] = await Promise.all([device.send('settings'), device.send('keys')]);
+  const home = mode === 'local';
+  const [c, s, k] = await Promise.all([device.code(), home && device.send('settings'), home && device.send('keys')]);
+  adminLoaded = c.ok && (!home || (s.ok && k.ok));
+  if (c.ok) fillCode(c.code);
+  else toast(errorText(c.error));
+  if (!home) return;
   if (s.ok) {
     settings = s.settings;
     fillSettings();
@@ -679,10 +698,23 @@ $('key-form').onsubmit = async (event) => {
   if (list.ok) renderKeys(list.keys);
 };
 
+// What Remote access still needs before Dumbledoor makes links for the online app (the
+// same rule as the firmware's), or '' when nothing is missing.
+function remoteGap(s) {
+  if (!s) return 'set up Remote access';
+  if (!s.mqtt.on) return 'turn on “Use remote access” and save';
+  if (!s.mqtt.appUrl) return 'fill in “Broker, for phones” (for EMQX: wss://<address>:8084/mqtt) and save';
+  if (!s.appUrl) return 'fill in “Where the online app is” and save';
+  return '';
+}
+
 function showLinks(name, reply) {
   const links = [];
   if (reply.link) links.push(['For the online app (works anywhere)', reply.link]);
-  if (reply.localLink) links.push([reply.link ? 'For home Wi-Fi only' : 'Works on home Wi-Fi (set up remote access for a link that works anywhere)', reply.localLink]);
+  if (reply.localLink) {
+    const gap = remoteGap(settings);
+    links.push([reply.link ? 'For home Wi-Fi only' : `Works on home Wi-Fi only. For a link that works anywhere, ${gap || 'set up Remote access'}, then make a new one.`, reply.localLink]);
+  }
   $('links').replaceChildren(
     ...links.map(([label, url]) => {
       const box = document.createElement('div');
@@ -728,14 +760,17 @@ function showLinks(name, reply) {
   $('new-key').hidden = false;
 }
 
+function fillCode(code) {
+  $('code-on').checked = code.on;
+  codeSeq = code.seq;
+  $('code-short').value = code.short;
+  $('code-long').value = code.long;
+  $('code-gap').value = code.gap;
+  renderCode();
+}
+
 function fillSettings() {
   const s = settings;
-  $('code-on').checked = s.code.on;
-  codeSeq = s.code.seq;
-  $('code-short').value = s.code.short;
-  $('code-long').value = s.code.long;
-  $('code-gap').value = s.code.gap;
-  renderCode();
   $('mqtt-on').checked = s.mqtt.on;
   $('mqtt-url').value = s.mqtt.url;
   $('mqtt-user').value = s.mqtt.user;
@@ -794,21 +829,23 @@ async function saveSettings(set, done = 'Saved.') {
   if (!reply.ok) return toast(errorText(reply.error));
   settings = reply.settings;
   fillSettings();
-  toast(done);
+  if (typeof done === 'function') toast(done(settings), 6000);
+  else toast(done);
 }
 
-$('code-form').onsubmit = (event) => {
+$('code-form').onsubmit = async (event) => {
   event.preventDefault();
   if ($('code-on').checked && codeSeq.length < 3 && !confirm('A code this short is easy to guess. Use it anyway?')) return;
-  saveSettings({
-    code: {
-      on: $('code-on').checked,
-      seq: codeSeq,
-      short: Number($('code-short').value),
-      long: Number($('code-long').value),
-      gap: Number($('code-gap').value),
-    },
+  const reply = await device.code({
+    on: $('code-on').checked,
+    seq: codeSeq,
+    short: Number($('code-short').value),
+    long: Number($('code-long').value),
+    gap: Number($('code-gap').value),
   });
+  if (!reply.ok) return toast(errorText(reply.error));
+  fillCode(reply.code);
+  toast('Saved.');
 };
 
 $('remote-form').onsubmit = (event) => {
@@ -827,7 +864,10 @@ $('remote-form').onsubmit = (event) => {
       },
       appUrl: $('app-url').value.trim(),
     },
-    'Saved. Links you make from now on work from anywhere.',
+    (s) => {
+      const gap = remoteGap(s);
+      return gap ? `Saved, but new links still only work at home: ${gap}.` : 'Saved. Links you make from now on work from anywhere.';
+    },
   );
 };
 

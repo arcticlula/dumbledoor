@@ -9,7 +9,7 @@ typedef struct {
     bool outputs_ok;             // GPIOs confirmed: the door and the monitor's line can be driven
     bool has_line[LINE_COUNT];   // wired call inputs
     bool has_bell;               // lobby calls go through the device to the monitor
-    bool ringing[LINE_COUNT];    // someone is holding the call button right now
+    bool ringing[LINE_COUNT];    // someone is holding the call button right now (never the lobby while the code is on)
     bool opening;                // the door release is active
     uint32_t auto_left_s;        // every lobby ring opens the door for this much longer
     int32_t mute_left_s;         // the monitor stays silent for this much longer; -1 = until unmuted

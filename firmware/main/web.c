@@ -71,10 +71,12 @@ static const asset_t s_assets[] = {
 // A WebSocket page that has signed in with a valid key.
 typedef struct {
     uint32_t key_id;
+    bool admin;   // gets the full state; other keys get the short one
 } ws_session_t;
 
 static httpd_handle_t s_server;
 static atomic_bool s_broadcast_queued;
+static char *s_short;   // the short state as last pushed; only the server's task
 static char s_etag[16];   // changes with every build, so phones pick up a new app
 
 static char *read_body(httpd_req_t *req)
@@ -376,7 +378,7 @@ static esp_err_t ota_post(httpd_req_t *req)
     return send_json(req, NULL);
 }
 
-static void sign_in(httpd_req_t *req, uint32_t key_id)
+static void sign_in(httpd_req_t *req, const key_info_t *who)
 {
     int fd = httpd_req_to_sockfd(req);
     ws_session_t *s = httpd_sess_get_ctx(req->handle, fd);
@@ -387,7 +389,8 @@ static void sign_in(httpd_req_t *req, uint32_t key_id)
         }
         httpd_sess_set_ctx(req->handle, fd, s, free);
     }
-    s->key_id = key_id;
+    s->key_id = who->id;
+    s->admin = who->admin;
 }
 
 // The app's connection on the home network: signed commands in, replies and state out.
@@ -417,7 +420,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
         bool authed;
         cJSON *reply = api_run((const char *)buf, frame.len, API_LOCAL, &who, &authed);
         if (authed) {
-            sign_in(req, who.id);
+            sign_in(req, &who);
         }
         char *json = cJSON_PrintUnformatted(reply);
         cJSON_Delete(reply);
@@ -449,24 +452,25 @@ static esp_err_t not_found(httpd_req_t *req, httpd_err_code_t error)
     return ESP_OK;
 }
 
+static char *state_json(bool full)
+{
+    cJSON *state = api_state(full);
+    char *json = cJSON_PrintUnformatted(state);
+    cJSON_Delete(state);
+    return json;
+}
+
+// Admin pages get the full state after every change. The others get the short state only
+// when it changes: a push at every change would tell them each time someone rings.
 static void broadcast(void *arg)
 {
     atomic_store(&s_broadcast_queued, false);
-    cJSON *state = api_state();
-    char *json = cJSON_PrintUnformatted(state);
-    cJSON_Delete(state);
-    if (!json) {
-        return;
-    }
+    char *short_json = state_json(false);
+    bool short_changed = short_json && (!s_short || strcmp(short_json, s_short));
+    char *full_json = NULL;
     size_t count = CONFIG_LWIP_MAX_SOCKETS;
     int fds[CONFIG_LWIP_MAX_SOCKETS];
     if (httpd_get_client_list(s_server, &count, fds) == ESP_OK) {
-        httpd_ws_frame_t frame = {
-            .final = true,
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t *)json,
-            .len = strlen(json),
-        };
         for (size_t i = 0; i < count; i++) {
             if (httpd_ws_get_fd_info(s_server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) {
                 continue;
@@ -479,10 +483,28 @@ static void broadcast(void *arg)
                 httpd_sess_trigger_close(s_server, fds[i]);   // its key was removed
                 continue;
             }
-            httpd_ws_send_frame_async(s_server, fds[i], &frame);
+            if (s->admin && !full_json) {
+                full_json = state_json(true);
+            }
+            const char *json = s->admin ? full_json : short_changed ? short_json : NULL;
+            if (json) {
+                httpd_ws_frame_t frame = {
+                    .final = true,
+                    .type = HTTPD_WS_TYPE_TEXT,
+                    .payload = (uint8_t *)json,
+                    .len = strlen(json),
+                };
+                httpd_ws_send_frame_async(s_server, fds[i], &frame);
+            }
         }
     }
-    free(json);
+    if (short_changed) {
+        free(s_short);
+        s_short = short_json;
+    } else {
+        free(short_json);
+    }
+    free(full_json);
 }
 
 void web_notify(void)

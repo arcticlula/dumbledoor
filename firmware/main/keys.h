@@ -43,6 +43,11 @@ int keys_list(key_info_t *out, int max);
 auth_result_t keys_verify(const char *envelope, size_t len, cJSON **payload, key_info_t *who, char *re);
 const char *keys_error(auth_result_t r);
 
+// HMAC-SHA256 of `msg` with key `id`'s secret, into `out` (32 bytes): something only that
+// phone can work out too, like the keystream that seals the lobby code (api.c).
+// ESP_ERR_NOT_FOUND if the key is gone.
+esp_err_t keys_hmac(uint32_t id, const void *msg, size_t len, uint8_t *out);
+
 // `secret_hex` (65 chars) gets the new key's secret.
 esp_err_t keys_add(const char *name, bool admin, key_info_t *out, char *secret_hex);
 // ESP_ERR_NOT_FOUND, or ESP_ERR_INVALID_STATE for the last admin key.

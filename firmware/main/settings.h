@@ -36,7 +36,10 @@ typedef struct {
 
 void settings_init(void);
 void settings_get(dd_settings_t *out);
+// Saves everything but the code, which only settings_set_code() changes. Admins change
+// the code from anywhere and the rest at home, so neither can undo the other's change.
 void settings_set(const dd_settings_t *s);
+void settings_set_code(const settings_code_t *code);
 void settings_get_code(settings_code_t *out);
 void settings_get_name(char *out, size_t size);
 

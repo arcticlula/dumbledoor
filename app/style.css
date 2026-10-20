@@ -43,6 +43,7 @@ h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
 a { color: inherit; }
 p { margin: 0; }
 [hidden] { display: none !important; }
+.guest .admin-only { display: none !important; } /* a phone from an ordinary link: just the button */
 .muted { color: var(--muted); font-size: 14px; }
 .lead { margin-bottom: 14px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

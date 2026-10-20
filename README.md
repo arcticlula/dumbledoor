@@ -25,7 +25,7 @@ The online app: [arcticlula.github.io/dumbledoor](https://arcticlula.github.io/d
 
 Dumbledoor listens to the call line from the panel and times every press, which is what makes press codes possible. To open the door, it "presses" the monitor's door button through a MOSFET and the right resistor. The schematic also routes the call line through the board, so the firmware can pass the call to the monitor or mute it. That part isn't connected yet: today the monitor rings straight from the panel.
 
-Each phone has its own key and signs every command with it, so the secret never travels, and a recorded command can't be replayed. Keys can be removed one by one. The broker that relays commands from outside can't open the door by itself.
+Each phone has its own key and signs every command with it, so the secret never travels, and a recorded command can't be replayed. Keys can be removed one by one. A phone paired from an ordinary link only gets the open button; admins also get rings, the activity and the settings. The broker that relays commands from outside can't open the door by itself, and only carries the activity encrypted for each admin.
 
 ## What's here
 

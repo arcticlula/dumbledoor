@@ -115,18 +115,11 @@ uint32_t settings_generation(void)
     return s_generation;
 }
 
-void settings_set(const dd_settings_t *s)
+// Makes st->s the settings and saves them. Caller holds s_lock.
+static void commit(stored_t *st)
 {
-    stored_t *st = calloc(1, sizeof(*st));
-    if (!st) {
-        ESP_LOGE(TAG, "out of memory");
-        return;
-    }
     st->version = SETTINGS_VERSION;
-    st->s = *s;
     sanitize(&st->s);
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     s_settings = st->s;
     s_generation++;
     nvs_handle_t h;
@@ -138,9 +131,37 @@ void settings_set(const dd_settings_t *s)
         }
         nvs_close(h);
     }
-    xSemaphoreGive(s_lock);
-    free(st);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save failed: %s", esp_err_to_name(err));
     }
+}
+
+void settings_set(const dd_settings_t *s)
+{
+    stored_t *st = calloc(1, sizeof(*st));
+    if (!st) {
+        ESP_LOGE(TAG, "out of memory");
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    st->s = *s;
+    st->s.code = s_settings.code;
+    commit(st);
+    xSemaphoreGive(s_lock);
+    free(st);
+}
+
+void settings_set_code(const settings_code_t *code)
+{
+    stored_t *st = calloc(1, sizeof(*st));
+    if (!st) {
+        ESP_LOGE(TAG, "out of memory");
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    st->s = s_settings;
+    st->s.code = *code;
+    commit(st);
+    xSemaphoreGive(s_lock);
+    free(st);
 }

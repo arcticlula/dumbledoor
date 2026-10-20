@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,7 @@
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "api.h"
+#include "keys.h"
 #include "remote.h"
 #include "settings.h"
 #include "util.h"
@@ -22,6 +24,11 @@ static esp_mqtt_client_handle_t s_client;   // only touched by remote_task
 static volatile bool s_restart;
 static volatile bool s_enabled;
 static volatile bool s_connected;
+static volatile bool s_fresh;          // (re)connected: publish the short state even if it's the same
+// Only touched by remote_task.
+static char *s_short;                  // the short state as last published
+static uint32_t s_sealed[KEYS_MAX];    // admin keys with a sealed state on the broker
+static int s_sealed_count;
 // Fixed while a client exists; read by the MQTT task's event handler.
 static char s_topic_state[TOPIC_LEN];
 static char s_topic_status[TOPIC_LEN];
@@ -35,6 +42,7 @@ static void on_mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected to the broker");
         s_connected = true;
+        s_fresh = true;
         esp_mqtt_client_subscribe_single(e->client, s_topic_cmd, 0);
         esp_mqtt_client_enqueue(e->client, s_topic_status, "online", 0, 1, 1, true);
         remote_notify();   // publish the state
@@ -83,6 +91,9 @@ static void configure(void)
         s_client = NULL;
     }
     s_connected = false;
+    free(s_short);
+    s_short = NULL;
+    s_sealed_count = 0;
 
     dd_settings_t *s = malloc(sizeof(*s));
     if (!s) {
@@ -122,15 +133,63 @@ static void configure(void)
     web_notify();
 }
 
-static void publish_state(void)
+static char *state_json(bool full)
 {
-    cJSON *state = api_state();
+    cJSON *state = api_state(full);
     char *json = cJSON_PrintUnformatted(state);
     cJSON_Delete(state);
-    if (json) {
+    return json;
+}
+
+// Every phone with the broker login can read <prefix>/<id>/state, so it gets the short
+// state, and only when that changes: its timing would otherwise show every ring. Each
+// admin gets the full state on <prefix>/<id>/state/<key id>, sealed with their key.
+static void publish_state(void)
+{
+    char *json = state_json(false);
+    if (json && (s_fresh || !s_short || strcmp(json, s_short))) {
+        s_fresh = false;
         esp_mqtt_client_publish(s_client, s_topic_state, json, 0, 0, 1);
+        free(s_short);
+        s_short = json;
+    } else {
         free(json);
     }
+
+    json = state_json(true);
+    key_info_t *keys = malloc(KEYS_MAX * sizeof(key_info_t));
+    if (!json || !keys) {
+        free(json);
+        free(keys);
+        return;
+    }
+    int n = keys_list(keys, KEYS_MAX);
+    char topic[TOPIC_LEN + 9];   // the state topic, "/" and a key id
+    for (int i = 0; i < s_sealed_count; i++) {
+        bool admin = false;
+        for (int j = 0; j < n; j++) {
+            admin |= keys[j].admin && keys[j].id == s_sealed[i];
+        }
+        if (!admin) {   // removed: clear what the broker keeps for it
+            snprintf(topic, sizeof(topic), "%s/%08" PRIx32, s_topic_state, s_sealed[i]);
+            esp_mqtt_client_publish(s_client, topic, NULL, 0, 0, 1);
+        }
+    }
+    s_sealed_count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!keys[i].admin) {
+            continue;
+        }
+        s_sealed[s_sealed_count++] = keys[i].id;
+        char *sealed = api_seal(keys[i].id, json);
+        if (sealed) {
+            snprintf(topic, sizeof(topic), "%s/%08" PRIx32, s_topic_state, keys[i].id);
+            esp_mqtt_client_publish(s_client, topic, sealed, 0, 0, 1);
+            free(sealed);
+        }
+    }
+    free(keys);
+    free(json);
 }
 
 static void remote_task(void *arg)

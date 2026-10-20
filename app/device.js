@@ -41,10 +41,56 @@ function nextTimestamp(keyId) {
   return t;
 }
 
+// `args` can also be a function of the timestamp, for fields sealed with it.
 export function sign(pairing, action, args = {}) {
-  const p = JSON.stringify({ d: pairing.d, t: nextTimestamp(pairing.k), a: action, ...args });
+  const t = nextTimestamp(pairing.k);
+  const p = JSON.stringify({ d: pairing.d, t, a: action, ...(typeof args === 'function' ? args(t) : args) });
   const s = toHex(hmacSha256(fromHex(pairing.s), utf8(p)));
-  return { text: JSON.stringify({ k: pairing.k, p, s }), re: s.slice(0, 16) };
+  return { text: JSON.stringify({ k: pairing.k, p, s }), re: s.slice(0, 16), t };
+}
+
+// The lobby code's presses travel sealed, so the broker and the other phones on it can't
+// read them: zero-padded to 12 bytes and XORed with HMAC-SHA256(this phone's secret,
+// "code>" + t) on the way to Dumbledoor, or "code<" + t on the way back, where t is the
+// command's timestamp. See docs/protocol.md.
+const CODE_MAX = 12;
+const codeKeystream = (pairing, dir, t) => hmacSha256(fromHex(pairing.s), utf8(`code${dir}${t}`));
+
+export function sealCode(pairing, dir, t, seq) {
+  const ks = codeKeystream(pairing, dir, t);
+  const bytes = new Uint8Array(CODE_MAX);
+  bytes.set(utf8(seq).subarray(0, CODE_MAX));
+  return toHex(bytes.map((b, i) => b ^ ks[i]));
+}
+
+// The presses, or null if `sealed` doesn't open to any.
+export function unsealCode(pairing, dir, t, sealed) {
+  if (!/^[0-9a-f]{24}$/.test(sealed)) return null;
+  const ks = codeKeystream(pairing, dir, t);
+  const seq = String.fromCharCode(...fromHex(sealed).map((b, i) => b ^ ks[i])).replace(/\0+$/, '');
+  return /^[.-]*$/.test(seq) ? seq : null;
+}
+
+// Through the broker, an admin's full state comes sealed with its key as
+// {n: nonce, m: tag, x: base64}: K = HMAC(secret, "state<" + n), block i of the keystream
+// is HMAC(K, "k" + i), and m is the first 16 bytes of HMAC(K, "m" + ciphertext). Returns
+// the state, or null if the message was changed or isn't for this key.
+export function unsealState(pairing, text) {
+  try {
+    const { n, m, x } = JSON.parse(text);
+    if (!/^[0-9a-f]{16}$/.test(n) || !/^[0-9a-f]{32}$/.test(m)) return null;
+    const k = hmacSha256(fromHex(pairing.s), utf8(`state<${n}`));
+    const tagged = Uint8Array.from(`m${atob(x)}`, (c) => c.charCodeAt(0));
+    if (toHex(hmacSha256(k, tagged).subarray(0, 16)) !== m) return null;
+    const bytes = tagged.subarray(1);
+    for (let off = 0; off < bytes.length; off += 32) {
+      const ks = hmacSha256(k, utf8(`k${off / 32}`));
+      for (let i = 0; i < 32 && off + i < bytes.length; i++) bytes[off + i] ^= ks[i];
+    }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
 }
 
 const backoff = (attempt) => Math.min(15000, 1000 * 2 ** attempt);
@@ -96,13 +142,17 @@ class LocalLink {
   }
 }
 
-// The broker: the device publishes its state there and listens for commands.
+// The broker: the device publishes its state there and listens for commands. Every phone
+// with the broker login can read the plain state topic, so it only has the short state;
+// admins get the full one on their own topic, sealed with their key.
 class RemoteLink {
   constructor(device) {
     this.device = device;
     this.ready = false;
     const m = device.pairing.m;
     this.base = `${m.t || 'dumbledoor'}/${device.pairing.d}`;
+    this.own = device.pairing.a ? `${this.base}/state/${device.pairing.k}` : '';
+    this.sealed = false; // an admin has had its full state
     this.client = new MqttClient(m.u, { username: m.user, password: m.pass, clientId: `dd-app-${randomHex(4)}` });
   }
 
@@ -110,11 +160,19 @@ class RemoteLink {
     const client = this.client;
     client.onmessage = (topic, text) => {
       const kind = topic.slice(this.base.length + 1);
-      if (kind === 'status') {
+      if (topic === this.own) {
+        const state = text && unsealState(this.device.pairing, text);
+        if (state) {
+          this.sealed = true;
+          this.device.setState(state);
+        }
+      } else if (kind === 'status') {
         this.ready = text === 'online';
         this.device.setStatus(this.ready ? 'online' : 'offline');
       } else if (kind === 'state' && text) {
-        this.device.setState(JSON.parse(text));
+        // Admins only take the plain state from firmware that put everything there.
+        const state = JSON.parse(text);
+        if (!this.own || (!this.sealed && state.events)) this.device.setState(state);
       } else if (kind === 'reply') {
         this.device.resolve(JSON.parse(text));
       }
@@ -125,7 +183,8 @@ class RemoteLink {
     };
     try {
       await client.connect();
-      await client.subscribe([`${this.base}/status`, `${this.base}/state`, `${this.base}/reply`]);
+      const topics = [`${this.base}/status`, `${this.base}/state`, `${this.base}/reply`];
+      await client.subscribe(this.own ? [...topics, this.own] : topics);
       // The status is retained, so it arrives right away unless the device never connected.
       setTimeout(() => {
         if (this.device.link === this && this.device.status === 'connecting') {
@@ -232,6 +291,20 @@ export class Dumbledoor extends EventTarget {
 
   get ready() {
     return !!this.link?.ready;
+  }
+
+  // The lobby code (admins): reads it, or changes the fields in `set`. Resolves to the
+  // reply with code.seq opened.
+  async code(set) {
+    let t = 0;
+    const reply = await this.send('code', (time) => {
+      t = time;
+      if (!set) return {};
+      return { set: 'seq' in set ? { ...set, seq: sealCode(this.pairing, '>', time, set.seq) } : set };
+    });
+    if (!reply.ok) return reply;
+    const seq = unsealCode(this.pairing, '<', t, reply.code?.seq);
+    return seq === null ? { ...reply, ok: false, error: 'garbled' } : { ...reply, code: { ...reply.code, seq } };
   }
 
   // Sends a signed command and resolves to the reply ({ ok, error, ... }). Never rejects.

@@ -92,9 +92,24 @@ static bool s_flash;
 static uint32_t s_flash_until;
 static bool s_led;
 static uint8_t s_presses;   // lobby presses since the last code ended, for the debug LEDs
+static uint32_t s_held_ms[KNOCK_MAX];   // lobby presses held back while the code is on
+static uint8_t s_held;
 static flash_t s_debug_flash;
 static uint32_t s_debug_since;
 static bool s_idle_logged;
+
+// While the lobby code is on, phones hear nothing of lobby presses until they stop: the
+// timing of each update would give the code away. Then poll_code() reports one outcome:
+// the door opening (the right code), a wrong code with its pattern, or these presses as
+// ordinary rings when there weren't enough for a code. Auto-open waits for that too.
+static void post_held(void)
+{
+    for (int i = 0; i < s_held; i++) {
+        event_t e = { .type = EV_RING, .line = LINE_LOBBY, .value = s_held_ms[i] };
+        events_post(&e);
+    }
+    s_held = 0;
+}
 
 static bool refresh_settings(void)
 {
@@ -103,6 +118,7 @@ static bool refresh_settings(void)
         return false;
     }
     s_settings_gen = gen;
+    post_held();   // the knock starts over below
     settings_code_t code;
     settings_get_code(&code);
     s_code_on = code.on && code.seq[0];
@@ -123,7 +139,8 @@ static void debug_flash(flash_t kind, uint32_t now)
     s_debug_since = now;
 }
 
-static void press_started(line_t line)
+// Both return whether phones see the change.
+static bool press_started(line_t line)
 {
     ESP_LOGI(TAG, "%s: ringing", LINE_NAMES[line]);
     portENTER_CRITICAL(&s_mux);
@@ -138,9 +155,10 @@ static void press_started(line_t line)
         }
     }
     notify_ring(line);
+    return line != LINE_LOBBY || !s_code_on;   // door_get_state() hides it
 }
 
-static void press_ended(line_t line, uint32_t duration, uint32_t now)
+static bool press_ended(line_t line, uint32_t duration, uint32_t now)
 {
     uint16_t lo, hi;
     if (line == LINE_LOBBY && intercom_take_range(&lo, &hi)) {
@@ -156,16 +174,22 @@ static void press_ended(line_t line, uint32_t duration, uint32_t now)
     bool auto_open = s_auto_on && !util_due(now, s_auto_until);
     portEXIT_CRITICAL(&s_mux);
 
+    if (line == LINE_LOBBY) {
+        knock_press_end(&s_knock, &s_timing, duration, now);
+        if (s_code_on) {
+            if (s_held < KNOCK_MAX) {
+                s_held_ms[s_held++] = duration;
+            }
+            return false;   // poll_code() reports it, and auto-opens, once the presses stop
+        }
+        if (auto_open) {
+            s_auto_pending = true;
+            s_auto_at = now + AUTO_OPEN_DELAY_MS;
+        }
+    }
     event_t e = { .type = EV_RING, .line = line, .value = duration };
     events_post(&e);
-    if (line != LINE_LOBBY) {
-        return;
-    }
-    knock_press_end(&s_knock, &s_timing, duration, now);
-    if (auto_open) {
-        s_auto_pending = true;
-        s_auto_at = now + AUTO_OPEN_DELAY_MS;
-    }
+    return true;
 }
 
 static bool poll_line(line_t line, uint32_t now)
@@ -187,8 +211,7 @@ static bool poll_line(line_t line, uint32_t now)
         p->active = true;
         p->start_ms = now - (p->on_ticks - 1) * TICK_MS;
         p->last_ms = now;
-        press_started(line);
-        return true;
+        return press_started(line);
     }
     if (signal) {
         p->last_ms = now;
@@ -203,7 +226,32 @@ static bool poll_line(line_t line, uint32_t now)
     }
     p->active = false;
     p->on_ticks = 0;
-    press_ended(line, p->last_ms - p->start_ms + TICK_MS, now);
+    return press_ended(line, p->last_ms - p->start_ms + TICK_MS, now);
+}
+
+// Returns whether code entry got paused.
+static bool code_failed(const char *seq, uint32_t now)
+{
+    s_held = 0;
+    debug_flash(FLASH_WRONG, now);
+    if (s_fails == 0 || util_due(now, s_first_fail_ms + CODE_FAIL_WINDOW_MS)) {
+        s_fails = 0;
+        s_first_fail_ms = now;
+    }
+    s_fails++;
+    ESP_LOGW(TAG, "wrong code (%" PRIu32 " in a row)", s_fails);
+    event_t e = { .type = EV_CODE_FAIL, .value = s_fails };
+    strlcpy(e.who, seq, sizeof(e.who));   // the presses as read: '.', '-' and '?'
+    events_post(&e);
+    if (s_fails < CODE_MAX_FAILS) {
+        return false;
+    }
+    ESP_LOGW(TAG, "pausing code entry for %d min", CODE_LOCK_MS / 60000);
+    s_fails = 0;
+    portENTER_CRITICAL(&s_mux);
+    s_code_locked = true;
+    s_code_locked_until = now + CODE_LOCK_MS;
+    portEXIT_CRITICAL(&s_mux);
     return true;
 }
 
@@ -216,49 +264,40 @@ static bool poll_code(uint32_t now)
         changed = true;
     }
     bool locked = s_code_locked;
+    bool auto_open = s_auto_on && !util_due(now, s_auto_until);
     portEXIT_CRITICAL(&s_mux);
 
     char seq[KNOCK_MAX + 1];
     int len = knock_poll(&s_knock, &s_timing, now, seq, sizeof(seq));
-    if (len > 0) {
-        s_presses = 0;   // the presses are over, one way or another
-    }
-    if (len == 0 || !s_code_on) {
+    if (len == 0) {
         return changed;
     }
-    if (locked) {
-        ESP_LOGW(TAG, "code entry is paused after wrong codes");
-        debug_flash(FLASH_WRONG, now);
+    s_presses = 0;   // the presses are over, one way or another
+    if (!s_code_on) {
+        post_held();
         return changed;
     }
     size_t code_len = strlen(s_code);
-    if ((size_t)len == code_len && strcmp(seq, s_code) == 0) {
+    if (locked) {
+        ESP_LOGW(TAG, "code entry is paused after wrong codes");
+        debug_flash(FLASH_WRONG, now);
+        post_held();
+    } else if ((size_t)len == code_len && strcmp(seq, s_code) == 0) {
         ESP_LOGI(TAG, "code accepted");
         s_fails = 0;
         debug_flash(FLASH_RIGHT, now);
-        door_open("code", "panel");
-        return changed;
+        if (door_open("code", "panel") == ESP_OK) {
+            s_held = 0;   // the opening says it all; the presses are the code itself
+            return changed;
+        }
+        post_held();
+    } else if ((size_t)len < (code_len < CODE_ATTEMPT_LEN ? code_len : CODE_ATTEMPT_LEN)) {
+        post_held();   // an ordinary ring
+    } else {
+        changed |= code_failed(seq, now);
     }
-    if ((size_t)len < (code_len < CODE_ATTEMPT_LEN ? code_len : CODE_ATTEMPT_LEN)) {
-        return changed;   // an ordinary ring
-    }
-    debug_flash(FLASH_WRONG, now);
-    if (s_fails == 0 || util_due(now, s_first_fail_ms + CODE_FAIL_WINDOW_MS)) {
-        s_fails = 0;
-        s_first_fail_ms = now;
-    }
-    s_fails++;
-    ESP_LOGW(TAG, "wrong code (%" PRIu32 " in a row)", s_fails);
-    event_t e = { .type = EV_CODE_FAIL, .value = s_fails };
-    events_post(&e);
-    if (s_fails >= CODE_MAX_FAILS) {
-        ESP_LOGW(TAG, "pausing code entry for %d min", CODE_LOCK_MS / 60000);
-        s_fails = 0;
-        portENTER_CRITICAL(&s_mux);
-        s_code_locked = true;
-        s_code_locked_until = now + CODE_LOCK_MS;
-        portEXIT_CRITICAL(&s_mux);
-        changed = true;
+    if (auto_open) {
+        door_open("auto-open", "auto");
     }
     return changed;
 }
@@ -534,6 +573,9 @@ void door_get_state(door_state_t *out)
     uint32_t now = util_uptime_ms();
     portENTER_CRITICAL(&s_mux);
     *out = s_state;
+    if (out->code_on) {
+        out->ringing[LINE_LOBBY] = false;   // reported once the presses stop (poll_code)
+    }
     out->auto_left_s = s_auto_on && !util_due(now, s_auto_until) ? (s_auto_until - now + 999) / 1000 : 0;
     out->mute_left_s = !s_mute_on               ? 0
                        : s_mute_forever         ? -1
